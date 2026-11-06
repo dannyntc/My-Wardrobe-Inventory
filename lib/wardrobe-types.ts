@@ -2,6 +2,7 @@ import type { WardrobeColour } from "./wardrobe-colours";
 import type { GarmentGroup } from "./wardrobe-taxonomy";
 
 export type Location = "girlfriend" | "home";
+export type InventoryLocation = Location | "wearing";
 
 export type WardrobeLocation = {
   id: Location;
@@ -31,7 +32,7 @@ export type ClothingItem = {
   needsClassification?: boolean;
   notes: string;
   quantity: number;
-  location: Location;
+  location: InventoryLocation;
   photo?: PhotoReference;
   createdAt: string;
   updatedAt: string;

@@ -28,9 +28,11 @@ const CONTENT_PATH = process.env.CONTENT_BLOB_PATH || "content/home.json";
 const LEGACY_COPIES_PREFIX = process.env.CONTENT_COPIES_PREFIX || "content/copies";
 const LEGACY_COPIES_INDEX_PATH = `${LEGACY_COPIES_PREFIX}/index.json`;
 const CONTENT_BACKUPS_PREFIX = process.env.CONTENT_BACKUPS_PREFIX || "content/backups";
-const BOARD_SCHEMA_VERSION = 7;
+const BOARD_SCHEMA_VERSION = 8;
 const LOCATIONS = ["girlfriend", "home"] as const;
 type Location = (typeof LOCATIONS)[number];
+const INVENTORY_LOCATIONS = [...LOCATIONS, "wearing"] as const;
+type InventoryLocation = (typeof INVENTORY_LOCATIONS)[number];
 
 type ClothingItem = {
   id: string;
@@ -44,7 +46,7 @@ type ClothingItem = {
   needsClassification: boolean;
   notes: string;
   quantity: number;
-  location: Location;
+  location: InventoryLocation;
   photo?: PhotoReference;
   createdAt: string;
   updatedAt: string;
@@ -114,6 +116,10 @@ function isLocation(value: unknown): value is Location {
   return typeof value === "string" && LOCATIONS.includes(value as Location);
 }
 
+function isInventoryLocation(value: unknown): value is InventoryLocation {
+  return typeof value === "string" && INVENTORY_LOCATIONS.includes(value as InventoryLocation);
+}
+
 function isTimestamp(value: unknown) {
   return typeof value === "string" && value.length > 0 && !Number.isNaN(Date.parse(value));
 }
@@ -124,7 +130,7 @@ function getSchemaVersionStatus(value: unknown): "missing" | "legacy" | "support
   if (schemaVersion === undefined) return "missing";
   if (typeof schemaVersion !== "number" || !Number.isInteger(schemaVersion) || schemaVersion < 1) return "invalid";
   if (schemaVersion === BOARD_SCHEMA_VERSION) return "supported";
-  if (schemaVersion === 6 || schemaVersion === 5 || schemaVersion === 4 || schemaVersion === 3 || schemaVersion === 2) return "supportedLegacy";
+  if (schemaVersion === 7 || schemaVersion === 6 || schemaVersion === 5 || schemaVersion === 4 || schemaVersion === 3 || schemaVersion === 2) return "supportedLegacy";
   if (schemaVersion === 1) return "legacy";
   return "unsupported";
 }
@@ -214,7 +220,7 @@ function isVersion2ClothingItem(value: unknown): value is ClothingItem {
     typeof candidate.notes === "string" &&
     isQuantity(candidate.quantity) &&
     (candidate.photo === undefined || isPhotoReference(candidate.photo)) &&
-    isLocation(candidate.location) &&
+    isInventoryLocation(candidate.location) &&
     isTimestamp(candidate.createdAt) &&
     isTimestamp(candidate.updatedAt)
   );

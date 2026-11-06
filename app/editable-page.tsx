@@ -23,6 +23,7 @@ import {
   LayoutGrid,
   Layers,
   List,
+  MapPin,
   Minus,
   Package,
   PanelBottom,
@@ -65,7 +66,7 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { upload } from "@vercel/blob/client";
-import { DragEvent as ReactDragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from "react";
+import { DragEvent as ReactDragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, type RefObject, useEffect, useRef, useState } from "react";
 import {
   GARMENT_GROUPS,
   getAllGarmentTypeOptions,
@@ -100,8 +101,9 @@ import {
 } from "../lib/keyword-rules";
 import { formatItemName, getSuggestedItemName } from "../lib/wardrobe-names";
 import { canUseDemoStorage, clearDemoRecord, DEMO_DRAFT_KEY, DEMO_SAVED_BOARD_KEY, readDemoRecord, writeDemoRecord } from "../lib/demo-storage";
-import type { ClothingItem, Location, PhotoReference, WardrobeLocation } from "../lib/wardrobe-types";
+import type { ClothingItem, InventoryLocation, Location, PhotoReference, WardrobeLocation } from "../lib/wardrobe-types";
 import type { DemoStarterContent } from "../lib/demo-fixture";
+import { applyOutfitChange, type OutfitSelection } from "../lib/wardrobe-transit";
 
 type LoadState = "loading" | "ready" | "saving" | "error";
 type ViewMode = "overview" | "list";
@@ -133,7 +135,7 @@ type KeywordRuleDraft = {
   enabled: boolean;
 };
 
-const BOARD_SCHEMA_VERSION = 7;
+const BOARD_SCHEMA_VERSION = 8;
 const DRAFT_STORAGE_KEY = "wardrobe-inventory-unsaved-draft-v2";
 
 export type WardrobePageConfig = {
@@ -207,7 +209,7 @@ function readSavedDraft(): SavedDraft | null {
     const value = JSON.parse(window.localStorage.getItem(DRAFT_STORAGE_KEY) || "null") as Partial<SavedDraft> | null;
     if (
       !value ||
-      (value.schemaVersion !== 2 && value.schemaVersion !== 3 && value.schemaVersion !== 4 && value.schemaVersion !== 5 && value.schemaVersion !== 6 && value.schemaVersion !== BOARD_SCHEMA_VERSION) ||
+      (value.schemaVersion !== 2 && value.schemaVersion !== 3 && value.schemaVersion !== 4 && value.schemaVersion !== 5 && value.schemaVersion !== 6 && value.schemaVersion !== 7 && value.schemaVersion !== BOARD_SCHEMA_VERSION) ||
       !Array.isArray(value.items) ||
       !value.taxonomy ||
       (value.keywordRules !== undefined && !Array.isArray(value.keywordRules)) ||
@@ -255,15 +257,17 @@ function createItemId() {
   return `item-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function getItemsForLocation(items: ClothingItem[], location: Location) {
+function getItemsForLocation(items: ClothingItem[], location: InventoryLocation) {
   return items.filter((item) => item.location === location);
 }
 
-function getLocationName(location: Location, locations: WardrobeLocation[]) {
+function getLocationName(location: InventoryLocation, locations: WardrobeLocation[]) {
+  if (location === "wearing") return "Currently wearing";
   return locations.find((candidate) => candidate.id === location)?.name ?? location;
 }
 
-function getLocationShortName(location: Location, locations: WardrobeLocation[]) {
+function getLocationShortName(location: InventoryLocation, locations: WardrobeLocation[]) {
+  if (location === "wearing") return "Wearing";
   return locations.find((candidate) => candidate.id === location)?.shortName ?? location;
 }
 
@@ -411,7 +415,8 @@ function getDropLocation(over: DragOverEvent["over"], items: ClothingItem[]): Lo
   if (!over) return null;
   const data = over.data.current as { location?: Location } | undefined;
   if (data?.location) return data.location;
-  return items.find((item) => item.id === over.id)?.location ?? null;
+  const item = items.find((candidate) => candidate.id === over.id);
+  return item?.location === "wearing" ? null : item?.location ?? null;
 }
 
 function moveItemToLocation(
@@ -421,7 +426,7 @@ function moveItemToLocation(
   overId: UniqueIdentifier,
 ) {
   const active = items.find((item) => item.id === activeId);
-  if (!active || active.location === location) return items;
+  if (!active || active.location === "wearing" || active.location === location) return items;
 
   const remaining = items.filter((item) => item.id !== activeId);
   const destination = remaining.filter((item) => item.location === location);
@@ -447,6 +452,222 @@ function StatusIcon({ state, dirty }: { state: LoadState; dirty: boolean }) {
   if (state === "saving") return <Cloud size={16} aria-hidden="true" />;
   if (dirty) return <TriangleAlert size={16} aria-hidden="true" />;
   return <Check size={16} aria-hidden="true" />;
+}
+
+function OutfitSelectionRow({
+  item,
+  quantity,
+  onChange,
+  actionLabel,
+}: {
+  item: ClothingItem;
+  quantity: number;
+  onChange: (quantity: number) => void;
+  actionLabel: string;
+}) {
+  return (
+    <div className="outfit-selection-row">
+      <div className="outfit-selection-copy">
+        <strong>{item.name}</strong>
+        <span>{item.garmentType} · {item.quantity} {item.quantity === 1 ? "piece" : "pieces"} available</span>
+      </div>
+      <span className="quantity-control outfit-quantity-control">
+        <button
+          type="button"
+          className="quantity-stepper"
+          onClick={() => onChange(Math.max(0, quantity - 1))}
+          disabled={quantity <= 0}
+          aria-label={"Decrease " + actionLabel + " quantity for " + item.name}
+        >
+          −
+        </button>
+        <input
+          aria-label={actionLabel + " quantity for " + item.name}
+          type="number"
+          inputMode="numeric"
+          min="0"
+          max={item.quantity}
+          value={quantity}
+          onChange={(event) => {
+            const next = Number(event.target.value);
+            onChange(Number.isFinite(next) ? Math.min(item.quantity, Math.max(0, Math.trunc(next))) : 0);
+          }}
+        />
+        <button
+          type="button"
+          className="quantity-stepper"
+          onClick={() => onChange(Math.min(item.quantity, quantity + 1))}
+          disabled={quantity >= item.quantity}
+          aria-label={"Increase " + actionLabel + " quantity for " + item.name}
+        >
+          +
+        </button>
+      </span>
+    </div>
+  );
+}
+
+function WearingPanel({
+  items,
+  onChangeOutfit,
+}: {
+  items: ClothingItem[];
+  onChangeOutfit: () => void;
+}) {
+  const total = getTotalQuantity(items);
+
+  return (
+    <section className="transit-panel" aria-labelledby="wearing-panel-title">
+      <header className="transit-panel-heading">
+        <div className="transit-panel-title">
+          <span className="transit-panel-icon" aria-hidden="true"><MapPin size={19} /></span>
+          <div>
+            <p className="section-label">Transit inventory</p>
+            <h2 id="wearing-panel-title">Currently wearing</h2>
+            <p>Pieces travelling between your two wardrobe locations.</p>
+          </div>
+        </div>
+        <button className="secondary-button" type="button" onClick={onChangeOutfit}>
+          <ArrowLeftRight size={16} aria-hidden="true" />
+          Change outfit
+        </button>
+      </header>
+      {items.length ? (
+        <div className="transit-item-list">
+          {items.map((item) => (
+            <span className="transit-item" key={item.id}>
+              <strong>{item.name}</strong>
+              <span>× {item.quantity}</span>
+            </span>
+          ))}
+          <span className="transit-total">{total} {total === 1 ? "piece" : "pieces"} in transit</span>
+        </div>
+      ) : (
+        <div className="transit-empty">
+          <strong>No pieces marked as wearing</strong>
+          <span>Choose an outfit before leaving either place so the tally follows you.</span>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function OutfitChangeDialog({
+  dialogRef,
+  locations,
+  at,
+  onLocationChange,
+  wearingItems,
+  locationItems,
+  putAway,
+  putOn,
+  onPutAwayChange,
+  onPutOnChange,
+  onClose,
+  onSubmit,
+  error,
+}: {
+  dialogRef: RefObject<HTMLElement | null>;
+  locations: WardrobeLocation[];
+  at: Location;
+  onLocationChange: (location: Location) => void;
+  wearingItems: ClothingItem[];
+  locationItems: ClothingItem[];
+  putAway: Record<string, number>;
+  putOn: Record<string, number>;
+  onPutAwayChange: (itemId: string, quantity: number) => void;
+  onPutOnChange: (itemId: string, quantity: number) => void;
+  onClose: () => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  error: string;
+}) {
+  const locationName = getLocationName(at, locations);
+  const putAwayCount = Object.values(putAway).reduce((total, quantity) => total + quantity, 0);
+  const putOnCount = Object.values(putOn).reduce((total, quantity) => total + quantity, 0);
+  const hasSelection = putAwayCount > 0 || putOnCount > 0;
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+      <section ref={dialogRef} className="item-dialog transit-dialog" role="dialog" aria-modal="true" aria-labelledby="outfit-dialog-title">
+        <div className="dialog-heading">
+          <div>
+            <p className="section-label">Transit outfit</p>
+            <h2 id="outfit-dialog-title">Change outfit</h2>
+          </div>
+          <button className="dialog-close" type="button" onClick={onClose} aria-label="Close change outfit dialog">
+            <X size={19} aria-hidden="true" />
+          </button>
+        </div>
+        <form className="item-form transit-form" onSubmit={onSubmit}>
+          <p className="transit-intro">Record the clothes you take off at a location, then choose what you put on from there.</p>
+          <label>
+            Change location
+            <select value={at} onChange={(event) => onLocationChange(event.target.value as Location)}>
+              {locations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}
+            </select>
+          </label>
+          <section className="outfit-selection-section" aria-labelledby="put-away-title">
+            <div className="outfit-selection-heading">
+              <div>
+                <h3 id="put-away-title">Put away at {locationName}</h3>
+                <p>Choose pieces you are taking off.</p>
+              </div>
+              <span className="selection-count">{putAwayCount} selected</span>
+            </div>
+            {wearingItems.length ? (
+              <div className="outfit-selection-list">
+                {wearingItems.map((item) => (
+                  <OutfitSelectionRow
+                    key={item.id}
+                    item={item}
+                    quantity={putAway[item.id] ?? 0}
+                    onChange={(quantity) => onPutAwayChange(item.id, quantity)}
+                    actionLabel="Put away"
+                  />
+                ))}
+              </div>
+            ) : (
+              <p className="outfit-selection-empty">Nothing is currently marked as wearing.</p>
+            )}
+          </section>
+          <section className="outfit-selection-section" aria-labelledby="put-on-title">
+            <div className="outfit-selection-heading">
+              <div>
+                <h3 id="put-on-title">Put on from {locationName}</h3>
+                <p>Choose pieces you are taking with you.</p>
+              </div>
+              <span className="selection-count">{putOnCount} selected</span>
+            </div>
+            {locationItems.length ? (
+              <div className="outfit-selection-list">
+                {locationItems.map((item) => (
+                  <OutfitSelectionRow
+                    key={item.id}
+                    item={item}
+                    quantity={putOn[item.id] ?? 0}
+                    onChange={(quantity) => onPutOnChange(item.id, quantity)}
+                    actionLabel="Put on"
+                  />
+                ))}
+              </div>
+            ) : (
+              <p className="outfit-selection-empty">No pieces are stored at this location.</p>
+            )}
+          </section>
+          <p className="transit-preview" role="status" aria-live="polite">
+            {putAwayCount || putOnCount
+              ? putAwayCount + " " + (putAwayCount === 1 ? "piece" : "pieces") + " stored at " + locationName + " · " + putOnCount + " " + (putOnCount === 1 ? "piece" : "pieces") + " now wearing"
+              : "Select at least one piece to put away or put on."}
+          </p>
+          {error ? <p className="form-error" role="alert">{error}</p> : null}
+          <div className="dialog-actions">
+            <button className="secondary-button" type="button" onClick={onClose}>Cancel</button>
+            <button className="save-button" type="submit" disabled={!hasSelection}>Apply outfit change</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
 }
 
 function PhotoThumbnail({ photo, name, onOpen }: { photo: PhotoReference; name: string; onOpen: (photo: PhotoReference, name: string) => void }) {
@@ -661,15 +882,17 @@ function SortableItem({
           <button className="card-action card-action-danger" type="button" onClick={() => onDelete(item)} aria-label={`Delete ${item.name}`}>
             <Trash2 size={15} aria-hidden="true" />
           </button>
-          <button
-            className="card-action move-card-button"
-            type="button"
-            onClick={() => onMove(item)}
-            aria-label={`Move some or all of ${item.name} to ${getLocationName(getOtherLocation(item.location), locations)}`}
-            title={`Move some or all to ${getLocationName(getOtherLocation(item.location), locations)}`}
-          >
-            <ArrowLeftRight size={16} aria-hidden="true" />
-          </button>
+          {item.location !== "wearing" ? (
+            <button
+              className="card-action move-card-button"
+              type="button"
+              onClick={() => onMove(item)}
+              aria-label={`Move some or all of ${item.name} to ${getLocationName(getOtherLocation(item.location), locations)}`}
+              title={`Move some or all to ${getLocationName(getOtherLocation(item.location), locations)}`}
+            >
+              <ArrowLeftRight size={16} aria-hidden="true" />
+            </button>
+          ) : null}
           {!dragDisabled ? (
             <button
               className="drag-handle"
@@ -1046,7 +1269,7 @@ type DemoStoredDraft = {
 function isDemoStoredBoard(value: unknown): value is DemoStoredBoard {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<DemoStoredBoard>;
-  return candidate.schemaVersion === BOARD_SCHEMA_VERSION
+  return (candidate.schemaVersion === 7 || candidate.schemaVersion === BOARD_SCHEMA_VERSION)
     && Array.isArray(candidate.items)
     && candidate.items.every((item) => isDemoItem(item))
     && Boolean(candidate.taxonomy && typeof candidate.taxonomy === "object")
@@ -1057,7 +1280,7 @@ function isDemoStoredBoard(value: unknown): value is DemoStoredBoard {
 function isDemoStoredDraft(value: unknown): value is DemoStoredDraft {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<DemoStoredDraft>;
-  return candidate.schemaVersion === BOARD_SCHEMA_VERSION
+  return (candidate.schemaVersion === 7 || candidate.schemaVersion === BOARD_SCHEMA_VERSION)
     && Array.isArray(candidate.items)
     && candidate.items.every((item) => isDemoItem(item))
     && Boolean(candidate.taxonomy && typeof candidate.taxonomy === "object")
@@ -1077,7 +1300,7 @@ function isDemoItem(value: unknown): value is ClothingItem {
     && typeof candidate.brand === "string"
     && typeof candidate.notes === "string"
     && typeof candidate.quantity === "number"
-    && (candidate.location === "girlfriend" || candidate.location === "home")
+    && (candidate.location === "girlfriend" || candidate.location === "home" || candidate.location === "wearing")
     && typeof candidate.createdAt === "string"
     && typeof candidate.updatedAt === "string";
 }
@@ -1099,6 +1322,11 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   const [hasLoadedBoard, setHasLoadedBoard] = useState(false);
   const [mobileAddLocation, setMobileAddLocation] = useState<Location>("girlfriend");
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [outfitDialogOpen, setOutfitDialogOpen] = useState(false);
+  const [outfitLocation, setOutfitLocation] = useState<Location>("girlfriend");
+  const [outfitPutAway, setOutfitPutAway] = useState<Record<string, number>>({});
+  const [outfitPutOn, setOutfitPutOn] = useState<Record<string, number>>({});
+  const [outfitError, setOutfitError] = useState("");
   const [transferItem, setTransferItem] = useState<ClothingItem | null>(null);
   const [transferQuantity, setTransferQuantity] = useState(1);
   const [transferError, setTransferError] = useState("");
@@ -1136,6 +1364,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   const [editingGarmentType, setEditingGarmentType] = useState<{ occasion: string; garmentGroup: GarmentGroup; name: string } | null>(null);
   const [garmentTypeEditValue, setGarmentTypeEditValue] = useState("");
   const dialogRef = useRef<HTMLElement | null>(null);
+  const outfitDialogRef = useRef<HTMLElement | null>(null);
   const transferDialogRef = useRef<HTMLElement | null>(null);
   const taxonomyDialogRef = useRef<HTMLElement | null>(null);
   const photoDialogRef = useRef<HTMLElement | null>(null);
@@ -1197,6 +1426,8 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   });
   const activeItem = activeId ? items.find((item) => item.id === activeId) ?? null : null;
   const currentTransferItem = transferItem ? items.find((item) => item.id === transferItem.id) ?? null : null;
+  const wearingItems = getItemsForLocation(items, "wearing");
+  const outfitLocationItems = getItemsForLocation(items, outfitLocation);
   const saveDisabled = !isDirty || !hasLoadedBoard || state === "loading" || state === "saving";
   const statusLabel = state === "loading"
     ? "Loading board"
@@ -1242,7 +1473,9 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
       setLastSavedAt(saved?.updatedAt ?? null);
       setStorageConfigured(storageAvailable);
       setLegacyContentPreserved(false);
-      setMigrationRequired(restoredDraft ? draft?.migrationRequired ?? false : false);
+      setMigrationRequired(restoredDraft
+        ? Boolean(draft?.migrationRequired) || draft?.schemaVersion !== BOARD_SCHEMA_VERSION
+        : Boolean(saved && saved.schemaVersion !== BOARD_SCHEMA_VERSION));
       setLoadedRevision(null);
       setHasLoadedBoard(true);
       setState("ready");
@@ -1363,7 +1596,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
       window.removeEventListener("resize", scheduleMeasurement);
       rootStyle.removeProperty("--mobile-save-bar-height");
     };
-  }, [hasLoadedBoard, items.length, filteredItems.length, dialogOpen, transferItem, taxonomyDialogOpen, photoPreview, locations]);
+  }, [hasLoadedBoard, items.length, filteredItems.length, dialogOpen, outfitDialogOpen, transferItem, taxonomyDialogOpen, photoPreview, locations]);
 
   useEffect(() => {
     if (!hasLoadedBoard) return;
@@ -1426,6 +1659,10 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
     setBrowsePaths({ girlfriend: {}, home: {} });
     setExpandedItemId(null);
     setDialogOpen(false);
+    setOutfitDialogOpen(false);
+    setOutfitLocation("girlfriend");
+    setOutfitPutAway({});
+    setOutfitPutOn({});
     setTransferItem(null);
     setTaxonomyDialogOpen(false);
     void loadContent();
@@ -1599,6 +1836,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   }
 
   function openEditDialog(item: ClothingItem) {
+    if (item.location === "wearing") return;
     dialogReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setEditingId(item.id);
     setFormManualFields({
@@ -1627,10 +1865,19 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   }
 
   function openTransferDialog(item: ClothingItem) {
+    if (item.location === "wearing") return;
     dialogReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setTransferItem(item);
     setTransferQuantity(1);
     setTransferError("");
+  }
+
+  function openOutfitDialog() {
+    dialogReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setOutfitPutAway({});
+    setOutfitPutOn({});
+    setOutfitError("");
+    setOutfitDialogOpen(true);
   }
 
   function openTaxonomyDialog() {
@@ -1657,6 +1904,53 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   function closeTransferDialog() {
     setTransferItem(null);
     setTransferError("");
+  }
+
+  function closeOutfitDialog() {
+    setOutfitDialogOpen(false);
+    setOutfitError("");
+  }
+
+  function handleOutfitLocationChange(location: Location) {
+    setOutfitLocation(location);
+    setOutfitPutOn({});
+    setOutfitError("");
+  }
+
+  function updateOutfitSelection(
+    side: "putAway" | "putOn",
+    itemId: string,
+    quantity: number,
+  ) {
+    const update = side === "putAway" ? setOutfitPutAway : setOutfitPutOn;
+    update((current) => {
+      const next = { ...current };
+      if (quantity > 0) next[itemId] = quantity;
+      else delete next[itemId];
+      return next;
+    });
+    setOutfitError("");
+  }
+
+  function completeOutfitChange(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const putAway: OutfitSelection[] = Object.entries(outfitPutAway).map(([itemId, quantity]) => ({ itemId, quantity }));
+    const putOn: OutfitSelection[] = Object.entries(outfitPutOn).map(([itemId, quantity]) => ({ itemId, quantity }));
+    try {
+      const nextItems = applyOutfitChange(items, { at: outfitLocation, putAway, putOn }, createItemId);
+      setItems(nextItems);
+      const putAwayCount = putAway.reduce((total, selection) => total + selection.quantity, 0);
+      const putOnCount = putOn.reduce((total, selection) => total + selection.quantity, 0);
+      setAnnouncement(
+        putAwayCount + " " + (putAwayCount === 1 ? "piece" : "pieces")
+        + " stored at " + getLocationName(outfitLocation, locations)
+        + " and " + putOnCount + " " + (putOnCount === 1 ? "piece" : "pieces")
+        + " now wearing. Changes are unsaved.",
+      );
+      closeOutfitDialog();
+    } catch (error) {
+      setOutfitError(error instanceof Error ? error.message : "Unable to apply this outfit change.");
+    }
   }
 
   function closeTaxonomyDialog() {
@@ -1981,13 +2275,13 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   }
 
   useEffect(() => {
-    if (!dialogOpen && !transferItem && !taxonomyDialogOpen && !photoPreview) return;
+    if (!dialogOpen && !outfitDialogOpen && !transferItem && !taxonomyDialogOpen && !photoPreview) return;
 
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
 
     const focusableSelector = "button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex=\"-1\"])";
-    const activeDialogRef = dialogOpen ? dialogRef : transferItem ? transferDialogRef : taxonomyDialogOpen ? taxonomyDialogRef : photoDialogRef;
+    const activeDialogRef = dialogOpen ? dialogRef : outfitDialogOpen ? outfitDialogRef : transferItem ? transferDialogRef : taxonomyDialogOpen ? taxonomyDialogRef : photoDialogRef;
     const focusDialog = () => {
       const firstFocusable = activeDialogRef.current?.querySelector<HTMLElement>(focusableSelector);
       firstFocusable?.focus();
@@ -1998,6 +2292,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
       if (event.key === "Escape") {
         event.preventDefault();
         if (dialogOpen) closeDialog();
+        if (outfitDialogOpen) closeOutfitDialog();
         if (transferItem) closeTransferDialog();
         if (taxonomyDialogOpen) closeTaxonomyDialog();
         if (photoPreview) closePhotoPreview();
@@ -2026,7 +2321,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
       dialogReturnFocusRef.current?.focus();
       dialogReturnFocusRef.current = null;
     };
-  }, [dialogOpen, transferItem, taxonomyDialogOpen, photoPreview]);
+  }, [dialogOpen, outfitDialogOpen, transferItem, taxonomyDialogOpen, photoPreview]);
 
   function applyKeywordAutofill(current: ItemForm, manualFields: FormManualFields) {
     const suggestion = suggestKeywordClassification(current.name, keywordRules, taxonomy, {
@@ -2192,6 +2487,10 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
       return;
     }
 
+    if (source.location === "wearing") {
+      setTransferError("Worn pieces use the outfit change flow. Close this dialog and choose Change outfit.");
+      return;
+    }
     const destination = getOtherLocation(source.location);
     const destinationMatch = items.find((candidate) => (
       candidate.id !== source.id &&
@@ -2280,7 +2579,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
       setItems((current) => {
         const activeItemAtDrop = current.find((item) => item.id === active.id);
         const overItem = current.find((item) => item.id === over.id);
-        if (!activeItemAtDrop || !overItem || active.id === over.id) return current;
+        if (!activeItemAtDrop || activeItemAtDrop.location === "wearing" || !overItem || active.id === over.id) return current;
         return reorderWithinLocation(current, activeItemAtDrop.location, active.id, over.id);
       });
     }
@@ -2410,6 +2709,8 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
           </div>
         </aside>
       ) : null}
+
+      {hasLoadedBoard ? <WearingPanel items={wearingItems} onChangeOutfit={openOutfitDialog} /> : null}
 
       <section className="board-filters" aria-label="Browse and filter clothing">
         <div className="search-field">
@@ -2560,7 +2861,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
 
       <p className="sr-only" aria-live="polite">{announcement}</p>
 
-      {hasLoadedBoard && !dialogOpen && !transferItem && !taxonomyDialogOpen && !photoPreview && !activeId ? (
+      {hasLoadedBoard && !dialogOpen && !outfitDialogOpen && !transferItem && !taxonomyDialogOpen && !photoPreview && !activeId ? (
         <button
           className="mobile-add-button"
           type="button"
@@ -2775,7 +3076,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
             <div className="transfer-summary" aria-label={`Move ${currentTransferItem.name} between locations`}>
               <span>{getLocationName(currentTransferItem.location, locations)}</span>
               <ArrowLeftRight size={18} aria-hidden="true" />
-              <span>{getLocationName(getOtherLocation(currentTransferItem.location), locations)}</span>
+              <span>{getLocationName(currentTransferItem.location === "wearing" ? "home" : getOtherLocation(currentTransferItem.location), locations)}</span>
             </div>
             <form className="item-form transfer-form" onSubmit={completeTransfer}>
               <p className="transfer-item-name">{currentTransferItem.name}</p>
@@ -2795,7 +3096,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
                 </span>
               </label>
               <p className="transfer-preview" role="status" aria-live="polite">
-                {currentTransferItem.quantity - transferQuantity} {currentTransferItem.quantity - transferQuantity === 1 ? "piece" : "pieces"} stays at {getLocationName(currentTransferItem.location, locations)} · {transferQuantity} {transferQuantity === 1 ? "piece" : "pieces"} moves to {getLocationName(getOtherLocation(currentTransferItem.location), locations)}
+                {currentTransferItem.quantity - transferQuantity} {currentTransferItem.quantity - transferQuantity === 1 ? "piece" : "pieces"} stays at {getLocationName(currentTransferItem.location, locations)} · {transferQuantity} {transferQuantity === 1 ? "piece" : "pieces"} moves to {getLocationName(currentTransferItem.location === "wearing" ? "home" : getOtherLocation(currentTransferItem.location), locations)}
               </p>
               {transferError ? <p className="form-error" role="alert">{transferError}</p> : null}
               <div className="dialog-actions">
@@ -2805,6 +3106,24 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
             </form>
           </section>
         </div>
+      ) : null}
+
+      {outfitDialogOpen ? (
+        <OutfitChangeDialog
+          dialogRef={outfitDialogRef}
+          locations={locations}
+          at={outfitLocation}
+          onLocationChange={handleOutfitLocationChange}
+          wearingItems={wearingItems}
+          locationItems={outfitLocationItems}
+          putAway={outfitPutAway}
+          putOn={outfitPutOn}
+          onPutAwayChange={(itemId, quantity) => updateOutfitSelection("putAway", itemId, quantity)}
+          onPutOnChange={(itemId, quantity) => updateOutfitSelection("putOn", itemId, quantity)}
+          onClose={closeOutfitDialog}
+          onSubmit={completeOutfitChange}
+          error={outfitError}
+        />
       ) : null}
 
       {photoPreview ? (
