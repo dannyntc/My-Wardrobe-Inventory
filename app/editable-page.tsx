@@ -103,7 +103,7 @@ import { formatItemName, getSuggestedItemName } from "../lib/wardrobe-names";
 import { canUseDemoStorage, clearDemoRecord, DEMO_DRAFT_KEY, DEMO_SAVED_BOARD_KEY, readDemoRecord, writeDemoRecord } from "../lib/demo-storage";
 import type { ClothingItem, InventoryLocation, Location, PhotoReference, WardrobeLocation } from "../lib/wardrobe-types";
 import type { DemoStarterContent } from "../lib/demo-fixture";
-import { applyArrival, applyOutfitChange, applyStartTransit, type OutfitSelection } from "../lib/wardrobe-transit";
+import { applyArrival, applyStartTransit, type OutfitSelection } from "../lib/wardrobe-transit";
 
 type LoadState = "loading" | "ready" | "saving" | "error";
 type ViewMode = "overview" | "list";
@@ -126,7 +126,7 @@ type ItemForm = {
   brand: string;
   notes: string;
   quantity: number;
-  location: Location;
+  location: InventoryLocation;
   photo?: PhotoReference;
 };
 
@@ -817,12 +817,12 @@ function WearingPanel({
   items,
   onStartTransit,
   onConfirmArrival,
-  onChangeOutfit,
+  onEdit,
 }: {
   items: ClothingItem[];
   onStartTransit: () => void;
   onConfirmArrival: () => void;
-  onChangeOutfit: () => void;
+  onEdit: (item: ClothingItem) => void;
 }) {
   const total = getTotalQuantity(items);
 
@@ -848,20 +848,21 @@ function WearingPanel({
               Confirm arrival
             </button>
           ) : null}
-          {items.length ? (
-            <button className="plain-button" type="button" onClick={onChangeOutfit}>
-              Change outfit
-            </button>
-          ) : null}
         </div>
       </header>
       {items.length ? (
         <div className="transit-item-list">
           {items.map((item) => (
-            <span className="transit-item" key={item.id}>
-              <strong>{item.name}</strong>
-              <span>× {item.quantity}</span>
-            </span>
+            <div className="transit-item" key={item.id}>
+              <span className="transit-item-copy">
+                <strong>{item.name}</strong>
+                <span>× {item.quantity}</span>
+              </span>
+              <button className="transit-item-edit" type="button" onClick={() => onEdit(item)}>
+                <Pencil size={14} aria-hidden="true" />
+                Edit
+              </button>
+            </div>
           ))}
           <span className="transit-total">{total} {total === 1 ? "piece" : "pieces"} in transit</span>
         </div>
@@ -872,114 +873,6 @@ function WearingPanel({
         </div>
       )}
     </section>
-  );
-}
-
-function OutfitChangeDialog({
-  dialogRef,
-  locations,
-  taxonomy,
-  at,
-  onLocationChange,
-  wearingItems,
-  locationItems,
-  putAway,
-  putOn,
-  onPutAwayChange,
-  onPutOnChange,
-  onClose,
-  onSubmit,
-  error,
-}: {
-  dialogRef: RefObject<HTMLElement | null>;
-  locations: WardrobeLocation[];
-  taxonomy: WardrobeTaxonomy;
-  at: Location;
-  onLocationChange: (location: Location) => void;
-  wearingItems: ClothingItem[];
-  locationItems: ClothingItem[];
-  putAway: Record<string, number>;
-  putOn: Record<string, number>;
-  onPutAwayChange: (itemId: string, quantity: number) => void;
-  onPutOnChange: (itemId: string, quantity: number) => void;
-  onClose: () => void;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
-  error: string;
-}) {
-  const locationName = getLocationName(at, locations);
-  const putAwayCount = Object.values(putAway).reduce((total, quantity) => total + quantity, 0);
-  const putOnCount = Object.values(putOn).reduce((total, quantity) => total + quantity, 0);
-  const hasSelection = putAwayCount > 0 || putOnCount > 0;
-
-  return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
-      <section ref={dialogRef} className="item-dialog transit-dialog" role="dialog" aria-modal="true" aria-labelledby="outfit-dialog-title">
-        <div className="dialog-heading">
-          <div>
-            <p className="section-label">Transit outfit</p>
-            <h2 id="outfit-dialog-title">Change outfit</h2>
-          </div>
-          <button className="dialog-close" type="button" onClick={onClose} aria-label="Close change outfit dialog">
-            <X size={19} aria-hidden="true" />
-          </button>
-        </div>
-        <form className="item-form transit-form" onSubmit={onSubmit}>
-          <p className="transit-intro">Record the clothes you take off at a location, then choose what you put on from there.</p>
-          <label>
-            Change location
-            <select value={at} onChange={(event) => onLocationChange(event.target.value as Location)}>
-              {locations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}
-            </select>
-          </label>
-          <section className="outfit-selection-section" aria-labelledby="put-away-title">
-            <div className="outfit-selection-heading">
-              <div>
-                <h3 id="put-away-title">Put away at {locationName}</h3>
-                <p>Choose pieces you are taking off.</p>
-              </div>
-              <span className="selection-count">{putAwayCount} selected</span>
-            </div>
-            <TransitItemPicker
-              idPrefix="change-put-away"
-              items={wearingItems}
-              taxonomy={taxonomy}
-              selected={putAway}
-              onSelectionChange={onPutAwayChange}
-              actionLabel="Put away"
-              emptyMessage="Nothing is currently marked as wearing."
-            />
-          </section>
-          <section className="outfit-selection-section" aria-labelledby="put-on-title">
-            <div className="outfit-selection-heading">
-              <div>
-                <h3 id="put-on-title">Put on from {locationName}</h3>
-                <p>Choose pieces you are taking with you.</p>
-              </div>
-              <span className="selection-count">{putOnCount} selected</span>
-            </div>
-            <TransitItemPicker
-              idPrefix="change-put-on"
-              items={locationItems}
-              taxonomy={taxonomy}
-              selected={putOn}
-              onSelectionChange={onPutOnChange}
-              actionLabel="Put on"
-              emptyMessage="No pieces are stored at this location."
-            />
-          </section>
-          <p className="transit-preview" role="status" aria-live="polite">
-            {putAwayCount || putOnCount
-              ? putAwayCount + " " + (putAwayCount === 1 ? "piece" : "pieces") + " stored at " + locationName + " · " + putOnCount + " " + (putOnCount === 1 ? "piece" : "pieces") + " now wearing"
-              : "Select at least one piece to put away or put on."}
-          </p>
-          {error ? <p className="form-error" role="alert">{error}</p> : null}
-          <div className="dialog-actions">
-            <button className="secondary-button" type="button" onClick={onClose}>Cancel</button>
-            <button className="save-button" type="submit" disabled={!hasSelection}>Apply outfit change</button>
-          </div>
-        </form>
-      </section>
-    </div>
   );
 }
 
@@ -1732,11 +1625,6 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   const [arrivalLocation, setArrivalLocation] = useState<Location | "">("");
   const [arrivalSelections, setArrivalSelections] = useState<Record<string, number>>({});
   const [arrivalError, setArrivalError] = useState("");
-  const [outfitDialogOpen, setOutfitDialogOpen] = useState(false);
-  const [outfitLocation, setOutfitLocation] = useState<Location>("girlfriend");
-  const [outfitPutAway, setOutfitPutAway] = useState<Record<string, number>>({});
-  const [outfitPutOn, setOutfitPutOn] = useState<Record<string, number>>({});
-  const [outfitError, setOutfitError] = useState("");
   const [transferItem, setTransferItem] = useState<ClothingItem | null>(null);
   const [transferQuantity, setTransferQuantity] = useState(1);
   const [transferError, setTransferError] = useState("");
@@ -1776,7 +1664,6 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   const dialogRef = useRef<HTMLElement | null>(null);
   const startTransitDialogRef = useRef<HTMLElement | null>(null);
   const arrivalDialogRef = useRef<HTMLElement | null>(null);
-  const outfitDialogRef = useRef<HTMLElement | null>(null);
   const transferDialogRef = useRef<HTMLElement | null>(null);
   const taxonomyDialogRef = useRef<HTMLElement | null>(null);
   const photoDialogRef = useRef<HTMLElement | null>(null);
@@ -1837,7 +1724,6 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   const currentTransferItem = transferItem ? items.find((item) => item.id === transferItem.id) ?? null : null;
   const wearingItems = getItemsForLocation(items, "wearing");
   const startTransitItems = getItemsForLocation(items, startTransitLocation);
-  const outfitLocationItems = getItemsForLocation(items, outfitLocation);
   const saveDisabled = !isDirty || !hasLoadedBoard || state === "loading" || state === "saving";
   const statusLabel = state === "loading"
     ? "Loading board"
@@ -2006,7 +1892,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
       window.removeEventListener("resize", scheduleMeasurement);
       rootStyle.removeProperty("--mobile-save-bar-height");
     };
-  }, [hasLoadedBoard, items.length, filteredItems.length, dialogOpen, startTransitDialogOpen, arrivalDialogOpen, outfitDialogOpen, transferItem, taxonomyDialogOpen, photoPreview, locations]);
+  }, [hasLoadedBoard, items.length, filteredItems.length, dialogOpen, startTransitDialogOpen, arrivalDialogOpen, transferItem, taxonomyDialogOpen, photoPreview, locations]);
 
   useEffect(() => {
     if (!hasLoadedBoard) return;
@@ -2077,10 +1963,6 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
     setArrivalLocation("");
     setArrivalSelections({});
     setArrivalError("");
-    setOutfitDialogOpen(false);
-    setOutfitLocation("girlfriend");
-    setOutfitPutAway({});
-    setOutfitPutOn({});
     setTransferItem(null);
     setTaxonomyDialogOpen(false);
     void loadContent();
@@ -2254,7 +2136,6 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   }
 
   function openEditDialog(item: ClothingItem) {
-    if (item.location === "wearing") return;
     dialogReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setEditingId(item.id);
     setFormManualFields({
@@ -2306,14 +2187,6 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
     setArrivalDialogOpen(true);
   }
 
-  function openOutfitDialog() {
-    dialogReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    setOutfitPutAway({});
-    setOutfitPutOn({});
-    setOutfitError("");
-    setOutfitDialogOpen(true);
-  }
-
   function openTaxonomyDialog() {
     dialogReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setTaxonomyError("");
@@ -2348,17 +2221,6 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   function closeArrivalDialog() {
     setArrivalDialogOpen(false);
     setArrivalError("");
-  }
-
-  function closeOutfitDialog() {
-    setOutfitDialogOpen(false);
-    setOutfitError("");
-  }
-
-  function handleOutfitLocationChange(location: Location) {
-    setOutfitLocation(location);
-    setOutfitPutOn({});
-    setOutfitError("");
   }
 
   function updateStartTransitSelection(itemId: string, quantity: number) {
@@ -2410,42 +2272,6 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
       closeArrivalDialog();
     } catch (error) {
       setArrivalError(error instanceof Error ? error.message : "Unable to confirm arrival.");
-    }
-  }
-
-  function updateOutfitSelection(
-    side: "putAway" | "putOn",
-    itemId: string,
-    quantity: number,
-  ) {
-    const update = side === "putAway" ? setOutfitPutAway : setOutfitPutOn;
-    update((current) => {
-      const next = { ...current };
-      if (quantity > 0) next[itemId] = quantity;
-      else delete next[itemId];
-      return next;
-    });
-    setOutfitError("");
-  }
-
-  function completeOutfitChange(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const putAway: OutfitSelection[] = Object.entries(outfitPutAway).map(([itemId, quantity]) => ({ itemId, quantity }));
-    const putOn: OutfitSelection[] = Object.entries(outfitPutOn).map(([itemId, quantity]) => ({ itemId, quantity }));
-    try {
-      const nextItems = applyOutfitChange(items, { at: outfitLocation, putAway, putOn }, createItemId);
-      setItems(nextItems);
-      const putAwayCount = putAway.reduce((total, selection) => total + selection.quantity, 0);
-      const putOnCount = putOn.reduce((total, selection) => total + selection.quantity, 0);
-      setAnnouncement(
-        putAwayCount + " " + (putAwayCount === 1 ? "piece" : "pieces")
-        + " stored at " + getLocationName(outfitLocation, locations)
-        + " and " + putOnCount + " " + (putOnCount === 1 ? "piece" : "pieces")
-        + " now wearing. Changes are unsaved.",
-      );
-      closeOutfitDialog();
-    } catch (error) {
-      setOutfitError(error instanceof Error ? error.message : "Unable to apply this outfit change.");
     }
   }
 
@@ -2771,7 +2597,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   }
 
   useEffect(() => {
-    if (!dialogOpen && !startTransitDialogOpen && !arrivalDialogOpen && !outfitDialogOpen && !transferItem && !taxonomyDialogOpen && !photoPreview) return;
+    if (!dialogOpen && !startTransitDialogOpen && !arrivalDialogOpen && !transferItem && !taxonomyDialogOpen && !photoPreview) return;
 
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
@@ -2783,13 +2609,11 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
         ? startTransitDialogRef
         : arrivalDialogOpen
           ? arrivalDialogRef
-          : outfitDialogOpen
-            ? outfitDialogRef
-            : transferItem
-              ? transferDialogRef
-              : taxonomyDialogOpen
-                ? taxonomyDialogRef
-                : photoDialogRef;
+          : transferItem
+            ? transferDialogRef
+            : taxonomyDialogOpen
+              ? taxonomyDialogRef
+              : photoDialogRef;
     const focusDialog = () => {
       const firstFocusable = activeDialogRef.current?.querySelector<HTMLElement>(focusableSelector);
       firstFocusable?.focus();
@@ -2802,7 +2626,6 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
         if (dialogOpen) closeDialog();
         if (startTransitDialogOpen) closeStartTransitDialog();
         if (arrivalDialogOpen) closeArrivalDialog();
-        if (outfitDialogOpen) closeOutfitDialog();
         if (transferItem) closeTransferDialog();
         if (taxonomyDialogOpen) closeTaxonomyDialog();
         if (photoPreview) closePhotoPreview();
@@ -2831,7 +2654,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
       dialogReturnFocusRef.current?.focus();
       dialogReturnFocusRef.current = null;
     };
-  }, [dialogOpen, startTransitDialogOpen, arrivalDialogOpen, outfitDialogOpen, transferItem, taxonomyDialogOpen, photoPreview]);
+  }, [dialogOpen, startTransitDialogOpen, arrivalDialogOpen, transferItem, taxonomyDialogOpen, photoPreview]);
 
   function applyKeywordAutofill(current: ItemForm, manualFields: FormManualFields) {
     const suggestion = suggestKeywordClassification(current.name, keywordRules, taxonomy, {
@@ -2998,7 +2821,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
     }
 
     if (source.location === "wearing") {
-      setTransferError("Worn pieces use the outfit change flow. Close this dialog and choose Change outfit.");
+      setTransferError("Worn pieces use the transit flow. Close this dialog and choose Confirm arrival.");
       return;
     }
     const destination = getOtherLocation(source.location);
@@ -3225,7 +3048,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
           items={wearingItems}
           onStartTransit={openStartTransitDialog}
           onConfirmArrival={openArrivalDialog}
-          onChangeOutfit={openOutfitDialog}
+          onEdit={openEditDialog}
         />
       ) : null}
 
@@ -3378,7 +3201,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
 
       <p className="sr-only" aria-live="polite">{announcement}</p>
 
-      {hasLoadedBoard && !dialogOpen && !startTransitDialogOpen && !arrivalDialogOpen && !outfitDialogOpen && !transferItem && !taxonomyDialogOpen && !photoPreview && !activeId ? (
+      {hasLoadedBoard && !dialogOpen && !startTransitDialogOpen && !arrivalDialogOpen && !transferItem && !taxonomyDialogOpen && !photoPreview && !activeId ? (
         <button
           className="mobile-add-button"
           type="button"
@@ -3390,7 +3213,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
         </button>
       ) : null}
 
-      {!dialogOpen && !startTransitDialogOpen && !arrivalDialogOpen && !outfitDialogOpen && !transferItem && !taxonomyDialogOpen && !photoPreview ? (
+      {!dialogOpen && !startTransitDialogOpen && !arrivalDialogOpen && !transferItem && !taxonomyDialogOpen && !photoPreview ? (
         <div ref={mobileSaveBarRef} className="mobile-save-bar" aria-label="Mobile save controls">
           <div className="mobile-save-status" role="status" aria-live="polite">
             <StatusIcon state={state} dirty={isDirty} />
@@ -3491,9 +3314,13 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
                 </label>
                 <label>
                   Location
-                  <select value={form.location} onChange={(event) => updateForm("location", event.target.value as Location)}>
-                    {locations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}
-                  </select>
+                  {form.location === "wearing" ? (
+                    <span className="location-readonly">Currently wearing · Confirm arrival to store this piece at a location.</span>
+                  ) : (
+                    <select value={form.location} onChange={(event) => updateForm("location", event.target.value as Location)}>
+                      {locations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}
+                    </select>
+                  )}
                 </label>
                 <label>
                   Quantity
@@ -3662,25 +3489,6 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
           onClose={closeArrivalDialog}
           onSubmit={completeArrival}
           error={arrivalError}
-        />
-      ) : null}
-
-      {outfitDialogOpen ? (
-        <OutfitChangeDialog
-          dialogRef={outfitDialogRef}
-          locations={locations}
-          taxonomy={taxonomy}
-          at={outfitLocation}
-          onLocationChange={handleOutfitLocationChange}
-          wearingItems={wearingItems}
-          locationItems={outfitLocationItems}
-          putAway={outfitPutAway}
-          putOn={outfitPutOn}
-          onPutAwayChange={(itemId, quantity) => updateOutfitSelection("putAway", itemId, quantity)}
-          onPutOnChange={(itemId, quantity) => updateOutfitSelection("putOn", itemId, quantity)}
-          onClose={closeOutfitDialog}
-          onSubmit={completeOutfitChange}
-          error={outfitError}
         />
       ) : null}
 

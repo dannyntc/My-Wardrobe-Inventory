@@ -5,12 +5,6 @@ export type OutfitSelection = {
   quantity: number;
 };
 
-export type OutfitChange = {
-  at: Location;
-  putAway: OutfitSelection[];
-  putOn: OutfitSelection[];
-};
-
 const MAX_QUANTITY = 999;
 const MAX_ITEM_RECORDS = 500;
 
@@ -119,24 +113,6 @@ function moveSelection(
     ];
   }
   if (next.length > MAX_ITEM_RECORDS) throw new Error(`This change would create more than ${MAX_ITEM_RECORDS} item records.`);
-  return next;
-}
-
-export function applyOutfitChange(
-  items: ClothingItem[],
-  change: OutfitChange,
-  createItemId: () => string,
-  now = new Date().toISOString(),
-) {
-  if (!change.putAway.length && !change.putOn.length) {
-    throw new Error("Select at least one piece to put away or put on.");
-  }
-  validateSelections(items, change.putAway, "wearing");
-  validateSelections(items, change.putOn, change.at);
-
-  let next = items.map((item) => ({ ...item }));
-  next = moveSelection(next, change.putAway, "wearing", change.at, createItemId, now);
-  next = moveSelection(next, change.putOn, change.at, "wearing", createItemId, now);
   return next;
 }
 

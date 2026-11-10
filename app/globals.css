@@ -285,9 +285,34 @@ h1 {
   font-size: 0.78rem;
 }
 
-.transit-item span {
+.transit-item-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.transit-item-copy > span {
   color: var(--blue-dark);
   font-weight: 850;
+}
+
+.transit-item-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 0 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--paper-strong);
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 800;
+}
+
+.transit-item-edit:hover {
+  border-color: var(--blue);
+  color: var(--blue-dark);
 }
 
 .transit-total {
@@ -317,11 +342,6 @@ h1 {
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 8px;
-}
-
-.transit-panel-actions .plain-button {
-  min-height: 44px;
-  padding: 0 8px;
 }
 
 .transit-picker {
@@ -613,6 +633,18 @@ h1 {
   color: var(--ink);
   font-size: 0.84rem;
   font-weight: 700;
+}
+
+.location-readonly {
+  display: block;
+  padding: 11px 12px;
+  border: 1px solid #c6d7fb;
+  border-radius: 9px;
+  background: var(--blue-soft);
+  color: var(--blue-dark);
+  font-size: 0.82rem;
+  font-weight: 750;
+  line-height: 1.4;
 }
 
 .clear-filters-button {
@@ -1565,43 +1597,6 @@ h1 {
   line-height: 1.45;
 }
 
-.outfit-selection-section {
-  display: grid;
-  gap: 12px;
-  padding: 14px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--canvas);
-}
-
-.outfit-selection-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.outfit-selection-heading h3 {
-  margin: 0 0 3px;
-  font-size: 0.92rem;
-  letter-spacing: -0.01em;
-}
-
-.outfit-selection-heading p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.74rem;
-  line-height: 1.35;
-}
-
-.selection-count {
-  flex: 0 0 auto;
-  color: var(--blue-dark);
-  font-size: 0.72rem;
-  font-weight: 850;
-  white-space: nowrap;
-}
-
 .outfit-selection-list {
   display: grid;
   gap: 7px;
@@ -1646,13 +1641,6 @@ h1 {
   height: 44px;
   padding: 8px 4px;
   text-align: center;
-}
-
-.outfit-selection-empty {
-  margin: 0;
-  color: var(--soft-muted);
-  font-size: 0.78rem;
-  font-style: italic;
 }
 
 .transit-preview {
