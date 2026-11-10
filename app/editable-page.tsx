@@ -646,12 +646,10 @@ function TransitBrowseControls({
 function TransitSelectionSummary({
   items,
   selected,
-  actionLabel,
   onRemove,
 }: {
   items: ClothingItem[];
   selected: Record<string, number>;
-  actionLabel: string;
   onRemove: (itemId: string) => void;
 }) {
   const selectedItems = Object.entries(selected)
@@ -660,7 +658,7 @@ function TransitSelectionSummary({
   const total = selectedItems.reduce((sum, entry) => sum + entry.quantity, 0);
 
   return (
-    <section className="transit-selection-summary" aria-label={`${actionLabel} selection`}>
+    <section className="transit-selection-summary" aria-label="Start transit selection">
       <div className="transit-selection-summary-heading">
         <div>
           <p className="section-label">Selected for transit</p>
@@ -673,7 +671,7 @@ function TransitSelectionSummary({
           {selectedItems.map(({ item, quantity }) => (
             <span className="transit-selection-summary-item" key={item.id}>
               <span><strong>{item.name}</strong> × {quantity}</span>
-              <button type="button" onClick={() => onRemove(item.id)} aria-label={`Remove ${item.name} from ${actionLabel.toLocaleLowerCase()} selection`}><X size={14} aria-hidden="true" /></button>
+              <button type="button" onClick={() => onRemove(item.id)} aria-label={`Remove ${item.name} from Start transit selection`}><X size={14} aria-hidden="true" /></button>
             </span>
           ))}
         </div>
@@ -692,6 +690,7 @@ function TransitItemPicker({
   onSelectionChange,
   actionLabel,
   emptyMessage,
+  variant,
 }: {
   idPrefix: string;
   items: ClothingItem[];
@@ -700,6 +699,7 @@ function TransitItemPicker({
   onSelectionChange: (itemId: string, quantity: number) => void;
   actionLabel: string;
   emptyMessage: string;
+  variant: "browse" | "compact";
 }) {
   const [filters, setFilters] = useState<BrowseFilters>({ searchQuery: "", occasion: "all", garmentGroup: "all", garmentType: "all", colour: "all", brand: "all" });
   const [viewMode, setViewMode] = useState<ViewMode>("overview");
@@ -708,9 +708,9 @@ function TransitItemPicker({
   const filteredItems = filterClothingItems(items, filters);
   const hasActiveFilters = Boolean(filters.searchQuery.trim() || filters.occasion !== "all" || filters.garmentGroup !== "all" || filters.garmentType !== "all" || filters.colour !== "all" || filters.brand !== "all");
 
-  function renderRows(rowItems: ClothingItem[]) {
+  function renderRows(rowItems: ClothingItem[], listClassName = "transit-picker-list") {
     return (
-      <div className="outfit-selection-list transit-picker-list">
+      <div className={`outfit-selection-list ${listClassName}`}>
         {rowItems.map((item) => (
           <OutfitSelectionRow
             key={item.id}
@@ -787,28 +787,40 @@ function TransitItemPicker({
   }
 
   const browseContent = renderOverview();
+  const isCompact = variant === "compact";
   return (
-    <div className="transit-picker">
-      <TransitSelectionSummary items={items} selected={selected} actionLabel={actionLabel} onRemove={(itemId) => onSelectionChange(itemId, 0)} />
-      <TransitBrowseControls
-        idPrefix={idPrefix}
-        items={items}
-        taxonomy={taxonomy}
-        filters={filters}
-        onFiltersChange={(nextFilters) => { setFilters(nextFilters); setBrowsePath({}); }}
-        viewMode={viewMode}
-        onViewModeChange={(nextViewMode) => { setViewMode(nextViewMode); setBrowsePath({}); }}
-        filtersOpen={filtersOpen}
-        onFiltersOpenChange={setFiltersOpen}
-      />
-      <div className="transit-picker-browse">
-        {browseContent ?? (
+    <div className={`transit-picker${isCompact ? " transit-picker-compact" : ""}`}>
+      {!isCompact ? <TransitSelectionSummary items={items} selected={selected} onRemove={(itemId) => onSelectionChange(itemId, 0)} /> : null}
+      {isCompact ? (
+        items.length ? renderRows(items, "transit-arrival-list") : (
           <div className="transit-picker-empty">
-            <strong>{items.length ? "No matching pieces" : emptyMessage}</strong>
-            <span>{items.length ? "Clear the search or filters to see more pieces." : "There are no pieces available in this inventory yet."}</span>
+            <strong>{emptyMessage}</strong>
+            <span>There are no pieces currently marked as Wearing.</span>
           </div>
-        )}
-      </div>
+        )
+      ) : (
+        <>
+          <TransitBrowseControls
+            idPrefix={idPrefix}
+            items={items}
+            taxonomy={taxonomy}
+            filters={filters}
+            onFiltersChange={(nextFilters) => { setFilters(nextFilters); setBrowsePath({}); }}
+            viewMode={viewMode}
+            onViewModeChange={(nextViewMode) => { setViewMode(nextViewMode); setBrowsePath({}); }}
+            filtersOpen={filtersOpen}
+            onFiltersOpenChange={setFiltersOpen}
+          />
+          <div className="transit-picker-browse">
+            {browseContent ?? (
+              <div className="transit-picker-empty">
+                <strong>{items.length ? "No matching pieces" : emptyMessage}</strong>
+                <span>{items.length ? "Clear the search or filters to see more pieces." : "There are no pieces available in this inventory yet."}</span>
+              </div>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -817,13 +829,13 @@ function WearingPanel({
   items,
   onStartTransit,
   onConfirmArrival,
-  onEdit,
+  onQuantityChange,
   onDelete,
 }: {
   items: ClothingItem[];
   onStartTransit: () => void;
   onConfirmArrival: () => void;
-  onEdit: (item: ClothingItem) => void;
+  onQuantityChange: (item: ClothingItem, quantity: number) => void;
   onDelete: (item: ClothingItem) => void;
 }) {
   const total = getTotalQuantity(items);
@@ -858,22 +870,42 @@ function WearingPanel({
             <div className="transit-item" key={item.id}>
               <span className="transit-item-copy">
                 <strong>{item.name}</strong>
-                <span>× {item.quantity}</span>
+                <span>Currently wearing · {item.quantity} {item.quantity === 1 ? "piece" : "pieces"}</span>
               </span>
-              <button className="transit-item-edit" type="button" onClick={() => onEdit(item)}>
-                <Pencil size={14} aria-hidden="true" />
-                Edit
-              </button>
-              <button
-                className="transit-item-edit transit-item-remove"
-                type="button"
-                onClick={() => onDelete(item)}
-                aria-label={`Remove ${item.name} from transit`}
-                title={`Remove ${item.name} from the wardrobe`}
-              >
-                <Trash2 size={14} aria-hidden="true" />
-                Remove
-              </button>
+              <div className="transit-item-actions">
+                <span className="transit-quantity-control" role="group" aria-label={`Quantity for ${item.name} while in transit`}>
+                  <button
+                    className="transit-quantity-step"
+                    type="button"
+                    onClick={() => item.quantity === 1 ? onDelete(item) : onQuantityChange(item, item.quantity - 1)}
+                    aria-label={item.quantity === 1 ? `Remove ${item.name} from transit` : `Decrease ${item.name} quantity`}
+                    title={item.quantity === 1 ? `Remove ${item.name} from transit` : `Decrease ${item.name} quantity`}
+                  >
+                    <Minus size={15} aria-hidden="true" />
+                  </button>
+                  <span className="transit-quantity-value" aria-live="polite">{item.quantity}</span>
+                  <button
+                    className="transit-quantity-step"
+                    type="button"
+                    onClick={() => onQuantityChange(item, item.quantity + 1)}
+                    disabled={item.quantity >= 999}
+                    aria-label={`Increase ${item.name} quantity`}
+                    title={item.quantity >= 999 ? "Maximum quantity is 999" : `Increase ${item.name} quantity`}
+                  >
+                    <Plus size={15} aria-hidden="true" />
+                  </button>
+                </span>
+                <button
+                  className="transit-item-remove"
+                  type="button"
+                  onClick={() => onDelete(item)}
+                  aria-label={`Remove ${item.name} from transit`}
+                  title={`Remove ${item.name} from the wardrobe`}
+                >
+                  <Trash2 size={14} aria-hidden="true" />
+                  <span>Remove</span>
+                </button>
+              </div>
             </div>
           ))}
           <span className="transit-total">{total} {total === 1 ? "piece" : "pieces"} in transit</span>
@@ -939,7 +971,7 @@ function TransitActionDialog({
           <p className="transit-intro">
             {isStart
               ? "Choose the clothes you are wearing as you leave a wardrobe location. They will be counted as Currently wearing until you confirm arrival."
-              : "Choose where you have arrived and the pieces that are no longer travelling. Anything left unselected will stay Currently wearing."}
+              : "Choose where you have arrived. All worn pieces start selected; adjust the list below if only part of the outfit has arrived. Anything left unselected will stay Currently wearing."}
           </p>
           <label>
             {isStart ? "Starting location" : "Arriving at"}
@@ -956,12 +988,13 @@ function TransitActionDialog({
             onSelectionChange={onSelectionChange}
             actionLabel={isStart ? "Take" : "Arrive with"}
             emptyMessage={isStart ? "No pieces are stored at this location." : "Nothing is currently marked as wearing."}
+            variant={isStart ? "browse" : "compact"}
           />
           <p className="transit-preview" role="status" aria-live="polite">
             {hasSelection && location
               ? isStart
                 ? `${selectedCount} ${selectedCount === 1 ? "piece" : "pieces"} from ${locationName} → Currently wearing`
-                : `${selectedCount} ${selectedCount === 1 ? "piece" : "pieces"} from Currently wearing → ${locationName}`
+                : `Currently wearing → ${locationName}`
               : isStart
                 ? "Select at least one piece to start transit."
                 : "Choose an arrival location and at least one piece to confirm arrival."}
@@ -2906,6 +2939,13 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
     )));
   }
 
+  function updateWearingQuantity(item: ClothingItem, quantity: number) {
+    const nextQuantity = clampQuantity(quantity);
+    if (nextQuantity === item.quantity) return;
+    updateItemQuantity(item, nextQuantity);
+    setAnnouncement(`${item.name} quantity changed to ${nextQuantity} while in transit. Changes are unsaved.`);
+  }
+
   function handleDragStart(event: DragStartEvent) {
     setExpandedItemId(null);
     setActiveId(event.active.id);
@@ -3060,7 +3100,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
           items={wearingItems}
           onStartTransit={openStartTransitDialog}
           onConfirmArrival={openArrivalDialog}
-          onEdit={openEditDialog}
+          onQuantityChange={updateWearingQuantity}
           onDelete={deleteItem}
         />
       ) : null}
