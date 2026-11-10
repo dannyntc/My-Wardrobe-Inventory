@@ -315,6 +315,11 @@ h1 {
   color: var(--blue-dark);
 }
 
+.transit-item-remove:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
+
 .transit-total {
   margin-left: auto;
   color: var(--muted);

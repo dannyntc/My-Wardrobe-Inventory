@@ -818,11 +818,13 @@ function WearingPanel({
   onStartTransit,
   onConfirmArrival,
   onEdit,
+  onDelete,
 }: {
   items: ClothingItem[];
   onStartTransit: () => void;
   onConfirmArrival: () => void;
   onEdit: (item: ClothingItem) => void;
+  onDelete: (item: ClothingItem) => void;
 }) {
   const total = getTotalQuantity(items);
 
@@ -861,6 +863,16 @@ function WearingPanel({
               <button className="transit-item-edit" type="button" onClick={() => onEdit(item)}>
                 <Pencil size={14} aria-hidden="true" />
                 Edit
+              </button>
+              <button
+                className="transit-item-edit transit-item-remove"
+                type="button"
+                onClick={() => onDelete(item)}
+                aria-label={`Remove ${item.name} from transit`}
+                title={`Remove ${item.name} from the wardrobe`}
+              >
+                <Trash2 size={14} aria-hidden="true" />
+                Remove
               </button>
             </div>
           ))}
@@ -3049,6 +3061,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
           onStartTransit={openStartTransitDialog}
           onConfirmArrival={openArrivalDialog}
           onEdit={openEditDialog}
+          onDelete={deleteItem}
         />
       ) : null}
 
