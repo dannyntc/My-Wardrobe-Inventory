@@ -30,7 +30,7 @@ _Overview: browse by location and occasion, switch between Overview and List, se
 
 5. **Save or reset the demo.** Select **Save changes** to keep your draft in the current browser. Demo changes are local to that browser and do not affect the personal wardrobe or another visitor’s demo. Select **Reset demo** to restore the fictional starter board.
 
-6. **Track an outfit in transit.** In **Currently wearing**, select **Change outfit** before leaving a location and use **Put on from** that location to select the pieces you are wearing. When you change at the other location, select it under **Change location**, put away the worn pieces, and choose any replacement pieces in the same action. Wearing is a current state, so it is included in the tally until you record where the pieces are stored.
+6. **Track an outfit in transit.** Select **Start transit**, choose the source location, and use the same search, filters, Overview, or List browsing as the main board to select the pieces you are wearing. Later, select **Confirm arrival**, choose either physical location—including the place you returned to—and confirm which worn pieces arrived there. Any pieces left unselected remain in **Currently wearing**. **Change outfit** remains available when you want to put away the current outfit and choose replacement pieces in one action.
 
 This project provides a shared men’s wardrobe inventory across two locations:
 

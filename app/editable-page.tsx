@@ -103,11 +103,19 @@ import { formatItemName, getSuggestedItemName } from "../lib/wardrobe-names";
 import { canUseDemoStorage, clearDemoRecord, DEMO_DRAFT_KEY, DEMO_SAVED_BOARD_KEY, readDemoRecord, writeDemoRecord } from "../lib/demo-storage";
 import type { ClothingItem, InventoryLocation, Location, PhotoReference, WardrobeLocation } from "../lib/wardrobe-types";
 import type { DemoStarterContent } from "../lib/demo-fixture";
-import { applyOutfitChange, type OutfitSelection } from "../lib/wardrobe-transit";
+import { applyArrival, applyOutfitChange, applyStartTransit, type OutfitSelection } from "../lib/wardrobe-transit";
 
 type LoadState = "loading" | "ready" | "saving" | "error";
 type ViewMode = "overview" | "list";
 type BrowsePath = { occasion?: string; garmentGroup?: GarmentGroup };
+type BrowseFilters = {
+  searchQuery: string;
+  occasion: string;
+  garmentGroup: string;
+  garmentType: string;
+  colour: string;
+  brand: string;
+};
 
 type ItemForm = {
   name: string;
@@ -362,6 +370,21 @@ function getBrandOptions(items: ClothingItem[], selectedBrand = "") {
   return values.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
 }
 
+function filterClothingItems(items: ClothingItem[], filters: BrowseFilters) {
+  const normalizedSearch = filters.searchQuery.trim().toLocaleLowerCase();
+  return items.filter((item) => {
+    const itemOccasions = normalizeStoredOccasions(item.occasions, item.occasion);
+    const matchesOccasion = filters.occasion === "all" || itemOccasions.includes(filters.occasion);
+    const matchesGarmentGroup = filters.garmentGroup === "all" || item.garmentGroup === filters.garmentGroup;
+    const matchesGarmentType = filters.garmentType === "all" || item.garmentType === filters.garmentType;
+    const matchesColour = filters.colour === "all" || item.colour === filters.colour;
+    const matchesBrand = filters.brand === "all"
+      || (filters.brand === "Unspecified" ? !item.brand : item.brand.toLocaleLowerCase() === filters.brand.toLocaleLowerCase());
+    const haystack = `${item.name} ${itemOccasions.join(" ")} ${item.garmentGroup} ${item.garmentType} ${item.colour} ${item.brand} ${item.notes}`.toLocaleLowerCase();
+    return matchesOccasion && matchesGarmentGroup && matchesGarmentType && matchesColour && matchesBrand && (!normalizedSearch || haystack.includes(normalizedSearch));
+  });
+}
+
 function normalizeItem(item: ClothingItem) {
   const occasions = normalizeStoredOccasions(item.occasions, item.occasion);
   const classification = normalizeStoredGarmentClassification(occasions, item.garmentGroup, item.garmentType);
@@ -507,11 +530,298 @@ function OutfitSelectionRow({
   );
 }
 
+function TransitBrowseControls({
+  idPrefix,
+  items,
+  taxonomy,
+  filters,
+  onFiltersChange,
+  viewMode,
+  onViewModeChange,
+  filtersOpen,
+  onFiltersOpenChange,
+}: {
+  idPrefix: string;
+  items: ClothingItem[];
+  taxonomy: WardrobeTaxonomy;
+  filters: BrowseFilters;
+  onFiltersChange: (filters: BrowseFilters) => void;
+  viewMode: ViewMode;
+  onViewModeChange: (viewMode: ViewMode) => void;
+  filtersOpen: boolean;
+  onFiltersOpenChange: (open: boolean) => void;
+}) {
+  const filteredItems = filterClothingItems(items, filters);
+  const hasActiveFilters = Boolean(filters.searchQuery.trim() || filters.occasion !== "all" || filters.garmentGroup !== "all" || filters.garmentType !== "all" || filters.colour !== "all" || filters.brand !== "all");
+  const activeFilterCount = [filters.searchQuery.trim(), filters.occasion, filters.garmentGroup, filters.garmentType, filters.colour, filters.brand].filter((value) => value && value !== "all").length;
+  const occasionOptions = getOccasionOptions(items, taxonomy);
+  const garmentTypeOptions = getAllGarmentTypeOptions(items, taxonomy, filters.occasion, filters.garmentGroup);
+  const brandOptions = getBrandOptions(items, filters.brand !== "all" && filters.brand !== "Unspecified" ? filters.brand : "");
+  const filterOptionsId = `${idPrefix}-filter-options`;
+
+  function updateFilter(key: keyof BrowseFilters, value: string) {
+    const next = { ...filters, [key]: value };
+    if (key === "occasion" && value !== "all" && next.garmentType !== "all" && !getAllGarmentTypeOptions(items, taxonomy, value, next.garmentGroup).includes(next.garmentType)) {
+      next.garmentType = "all";
+    }
+    if (key === "garmentGroup" && value !== "all" && next.garmentType !== "all" && !getAllGarmentTypeOptions(items, taxonomy, next.occasion, value).includes(next.garmentType)) {
+      next.garmentType = "all";
+    }
+    onFiltersChange(next);
+  }
+
+  return (
+    <section className="board-filters transit-picker-controls" aria-label="Search and filter transit items">
+      <div className="search-field">
+        <Search size={17} aria-hidden="true" />
+        <input
+          type="search"
+          aria-label="Search transit clothing"
+          placeholder="Search shirts, chinos, shoes, or notes"
+          value={filters.searchQuery}
+          onChange={(event) => updateFilter("searchQuery", event.target.value)}
+        />
+        {filters.searchQuery ? <button type="button" className="clear-filter-button" onClick={() => updateFilter("searchQuery", "")} aria-label="Clear transit search"><X size={16} aria-hidden="true" /></button> : null}
+      </div>
+      <div className="browse-mode-toggle" role="group" aria-label="Transit picker view mode">
+        <button className="view-mode-button" data-active={viewMode === "overview" || undefined} type="button" onClick={() => onViewModeChange("overview")}>
+          <LayoutGrid size={15} aria-hidden="true" />
+          Overview
+        </button>
+        <button className="view-mode-button" data-active={viewMode === "list" || undefined} type="button" onClick={() => onViewModeChange("list")}>
+          <List size={15} aria-hidden="true" />
+          List
+        </button>
+      </div>
+      <button className="filter-toggle" type="button" onClick={() => onFiltersOpenChange(!filtersOpen)} aria-expanded={filtersOpen} aria-controls={filterOptionsId}>
+        <SlidersHorizontal size={16} aria-hidden="true" />
+        Filters{activeFilterCount ? ` · ${activeFilterCount}` : ""}
+      </button>
+      <div className={`filter-options${filtersOpen ? " filter-options-open" : ""}`} id={filterOptionsId}>
+        <label className="category-filter">
+          <span>Occasion</span>
+          <select value={filters.occasion} onChange={(event) => updateFilter("occasion", event.target.value)} aria-label="Filter transit items by occasion">
+            <option value="all">All occasions</option>
+            {occasionOptions.map((occasion) => <option key={occasion} value={occasion}>{occasion}</option>)}
+          </select>
+        </label>
+        <label className="category-filter">
+          <span>Group</span>
+          <select value={filters.garmentGroup} onChange={(event) => updateFilter("garmentGroup", event.target.value)} aria-label="Filter transit items by group">
+            <option value="all">All groups</option>
+            {getGarmentGroupOptions().map((garmentGroup) => <option key={garmentGroup} value={garmentGroup}>{garmentGroup}</option>)}
+          </select>
+        </label>
+        <label className="category-filter">
+          <span>Garment type</span>
+          <select value={filters.garmentType} onChange={(event) => updateFilter("garmentType", event.target.value)} aria-label="Filter transit items by garment type">
+            <option value="all">All garment types</option>
+            {garmentTypeOptions.map((garmentType) => <option key={garmentType} value={garmentType}>{garmentType}</option>)}
+          </select>
+        </label>
+        <label className="category-filter">
+          <span>Colour</span>
+          <select value={filters.colour} onChange={(event) => updateFilter("colour", event.target.value)} aria-label="Filter transit items by colour">
+            <option value="all">All colours</option>
+            {COLOUR_OPTIONS.map((colour) => <option key={colour} value={colour}>{colour}</option>)}
+          </select>
+        </label>
+        <label className="category-filter">
+          <span>Brand</span>
+          <select value={filters.brand} onChange={(event) => updateFilter("brand", event.target.value)} aria-label="Filter transit items by brand">
+            <option value="all">All brands</option>
+            <option value="Unspecified">Unspecified</option>
+            {brandOptions.map((brand) => <option key={brand} value={brand}>{brand}</option>)}
+          </select>
+        </label>
+        {hasActiveFilters ? <button className="clear-filters-button" type="button" onClick={() => onFiltersChange({ searchQuery: "", occasion: "all", garmentGroup: "all", garmentType: "all", colour: "all", brand: "all" })}>Clear filters</button> : null}
+      </div>
+      <span className="filter-result" aria-live="polite">
+        {hasActiveFilters ? `${filteredItems.length} of ${items.length} types shown` : `${items.length} ${items.length === 1 ? "type" : "types"} · ${getTotalQuantity(items)} ${getTotalQuantity(items) === 1 ? "piece" : "pieces"}`}
+      </span>
+    </section>
+  );
+}
+
+function TransitSelectionSummary({
+  items,
+  selected,
+  actionLabel,
+  onRemove,
+}: {
+  items: ClothingItem[];
+  selected: Record<string, number>;
+  actionLabel: string;
+  onRemove: (itemId: string) => void;
+}) {
+  const selectedItems = Object.entries(selected)
+    .map(([itemId, quantity]) => ({ item: items.find((candidate) => candidate.id === itemId), quantity }))
+    .filter((entry): entry is { item: ClothingItem; quantity: number } => Boolean(entry.item && entry.quantity > 0));
+  const total = selectedItems.reduce((sum, entry) => sum + entry.quantity, 0);
+
+  return (
+    <section className="transit-selection-summary" aria-label={`${actionLabel} selection`}>
+      <div className="transit-selection-summary-heading">
+        <div>
+          <p className="section-label">Selected for transit</p>
+          <strong>{total} {total === 1 ? "piece" : "pieces"}</strong>
+        </div>
+        <span>{selectedItems.length} {selectedItems.length === 1 ? "type" : "types"}</span>
+      </div>
+      {selectedItems.length ? (
+        <div className="transit-selection-summary-list">
+          {selectedItems.map(({ item, quantity }) => (
+            <span className="transit-selection-summary-item" key={item.id}>
+              <span><strong>{item.name}</strong> × {quantity}</span>
+              <button type="button" onClick={() => onRemove(item.id)} aria-label={`Remove ${item.name} from ${actionLabel.toLocaleLowerCase()} selection`}><X size={14} aria-hidden="true" /></button>
+            </span>
+          ))}
+        </div>
+      ) : (
+        <p className="transit-selection-summary-empty">Choose pieces below. Your selection stays here while you search or browse.</p>
+      )}
+    </section>
+  );
+}
+
+function TransitItemPicker({
+  idPrefix,
+  items,
+  taxonomy,
+  selected,
+  onSelectionChange,
+  actionLabel,
+  emptyMessage,
+}: {
+  idPrefix: string;
+  items: ClothingItem[];
+  taxonomy: WardrobeTaxonomy;
+  selected: Record<string, number>;
+  onSelectionChange: (itemId: string, quantity: number) => void;
+  actionLabel: string;
+  emptyMessage: string;
+}) {
+  const [filters, setFilters] = useState<BrowseFilters>({ searchQuery: "", occasion: "all", garmentGroup: "all", garmentType: "all", colour: "all", brand: "all" });
+  const [viewMode, setViewMode] = useState<ViewMode>("overview");
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [browsePath, setBrowsePath] = useState<BrowsePath>({});
+  const filteredItems = filterClothingItems(items, filters);
+  const hasActiveFilters = Boolean(filters.searchQuery.trim() || filters.occasion !== "all" || filters.garmentGroup !== "all" || filters.garmentType !== "all" || filters.colour !== "all" || filters.brand !== "all");
+
+  function renderRows(rowItems: ClothingItem[]) {
+    return (
+      <div className="outfit-selection-list transit-picker-list">
+        {rowItems.map((item) => (
+          <OutfitSelectionRow
+            key={item.id}
+            item={item}
+            quantity={selected[item.id] ?? 0}
+            onChange={(quantity) => onSelectionChange(item.id, quantity)}
+            actionLabel={actionLabel}
+          />
+        ))}
+      </div>
+    );
+  }
+
+  function renderOverview() {
+    if (hasActiveFilters || viewMode === "list") return filteredItems.length ? renderRows(filteredItems) : null;
+    if (!browsePath.occasion) {
+      const occasions = taxonomy.occasions.filter((occasion) => getItemsForOccasion(items, occasion).length);
+      return occasions.length ? (
+        <div className="overview-grid transit-picker-category-grid" aria-label="Transit occasions">
+          {occasions.map((occasion) => {
+            const matchingItems = getItemsForOccasion(items, occasion);
+            return (
+              <button className="overview-tile transit-picker-category" type="button" key={occasion} onClick={() => setBrowsePath({ occasion })}>
+                <span className="overview-tile-icon" aria-hidden="true"><Shirt size={22} /></span>
+                <span className="overview-tile-copy"><strong>{occasion}</strong><span>{matchingItems.length} {matchingItems.length === 1 ? "type" : "types"} · {getTotalQuantity(matchingItems)} {getTotalQuantity(matchingItems) === 1 ? "piece" : "pieces"}</span></span>
+                <ChevronRight size={17} aria-hidden="true" />
+              </button>
+            );
+          })}
+        </div>
+      ) : null;
+    }
+
+    if (!browsePath.garmentGroup) {
+      const groups = getGarmentGroupOptions().filter((garmentGroup) => getItemsForGroup(items, browsePath.occasion ?? "", garmentGroup).length);
+      return (
+        <div className="transit-picker-browse-page">
+          <button className="overview-back" type="button" onClick={() => setBrowsePath({})}><ChevronLeft size={16} aria-hidden="true" /> All occasions</button>
+          <div className="overview-breadcrumb"><span>{browsePath.occasion}</span><ChevronRight size={14} aria-hidden="true" /><strong>Choose a group</strong></div>
+          <div className="overview-grid transit-picker-category-grid" aria-label="Transit garment groups">
+            {groups.map((garmentGroup) => {
+              const matchingItems = getItemsForGroup(items, browsePath.occasion ?? "", garmentGroup);
+              return (
+                <button className="overview-tile transit-picker-category" type="button" key={garmentGroup} onClick={() => setBrowsePath({ occasion: browsePath.occasion, garmentGroup })}>
+                  <span className="overview-tile-icon" aria-hidden="true"><Layers size={22} /></span>
+                  <span className="overview-tile-copy"><strong>{garmentGroup}</strong><span>{matchingItems.length} {matchingItems.length === 1 ? "type" : "types"} · {getTotalQuantity(matchingItems)} {getTotalQuantity(matchingItems) === 1 ? "piece" : "pieces"}</span></span>
+                  <ChevronRight size={17} aria-hidden="true" />
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      );
+    }
+
+    const groupItems = getItemsForGroup(items, browsePath.occasion ?? "", browsePath.garmentGroup);
+    const itemGroups = Array.from(new Map(groupItems.map((item) => [item.garmentType, [] as ClothingItem[]])).keys())
+      .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }))
+      .map((garmentType) => ({ garmentType, items: groupItems.filter((item) => item.garmentType === garmentType) }));
+    return (
+      <div className="transit-picker-browse-page">
+        <button className="overview-back" type="button" onClick={() => setBrowsePath({ occasion: browsePath.occasion })}><ChevronLeft size={16} aria-hidden="true" /> {browsePath.occasion}</button>
+        <div className="overview-breadcrumb"><span>{browsePath.occasion}</span><ChevronRight size={14} aria-hidden="true" /><strong>{browsePath.garmentGroup}</strong></div>
+        <div className="transit-picker-groups">
+          {itemGroups.map((group) => (
+            <section className="transit-picker-group" key={group.garmentType}>
+              <header><h3>{group.garmentType}</h3><span>{getTotalQuantity(group.items)} {getTotalQuantity(group.items) === 1 ? "piece" : "pieces"}</span></header>
+              {renderRows(group.items)}
+            </section>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  const browseContent = renderOverview();
+  return (
+    <div className="transit-picker">
+      <TransitSelectionSummary items={items} selected={selected} actionLabel={actionLabel} onRemove={(itemId) => onSelectionChange(itemId, 0)} />
+      <TransitBrowseControls
+        idPrefix={idPrefix}
+        items={items}
+        taxonomy={taxonomy}
+        filters={filters}
+        onFiltersChange={(nextFilters) => { setFilters(nextFilters); setBrowsePath({}); }}
+        viewMode={viewMode}
+        onViewModeChange={(nextViewMode) => { setViewMode(nextViewMode); setBrowsePath({}); }}
+        filtersOpen={filtersOpen}
+        onFiltersOpenChange={setFiltersOpen}
+      />
+      <div className="transit-picker-browse">
+        {browseContent ?? (
+          <div className="transit-picker-empty">
+            <strong>{items.length ? "No matching pieces" : emptyMessage}</strong>
+            <span>{items.length ? "Clear the search or filters to see more pieces." : "There are no pieces available in this inventory yet."}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function WearingPanel({
   items,
+  onStartTransit,
+  onConfirmArrival,
   onChangeOutfit,
 }: {
   items: ClothingItem[];
+  onStartTransit: () => void;
+  onConfirmArrival: () => void;
   onChangeOutfit: () => void;
 }) {
   const total = getTotalQuantity(items);
@@ -527,10 +837,23 @@ function WearingPanel({
             <p>Pieces travelling between your two wardrobe locations.</p>
           </div>
         </div>
-        <button className="secondary-button" type="button" onClick={onChangeOutfit}>
-          <ArrowLeftRight size={16} aria-hidden="true" />
-          Change outfit
-        </button>
+        <div className="transit-panel-actions">
+          <button className="secondary-button" type="button" onClick={onStartTransit}>
+            <ArrowLeftRight size={16} aria-hidden="true" />
+            Start transit
+          </button>
+          {items.length ? (
+            <button className="save-button" type="button" onClick={onConfirmArrival}>
+              <MapPin size={16} aria-hidden="true" />
+              Confirm arrival
+            </button>
+          ) : null}
+          {items.length ? (
+            <button className="plain-button" type="button" onClick={onChangeOutfit}>
+              Change outfit
+            </button>
+          ) : null}
+        </div>
       </header>
       {items.length ? (
         <div className="transit-item-list">
@@ -555,6 +878,7 @@ function WearingPanel({
 function OutfitChangeDialog({
   dialogRef,
   locations,
+  taxonomy,
   at,
   onLocationChange,
   wearingItems,
@@ -569,6 +893,7 @@ function OutfitChangeDialog({
 }: {
   dialogRef: RefObject<HTMLElement | null>;
   locations: WardrobeLocation[];
+  taxonomy: WardrobeTaxonomy;
   at: Location;
   onLocationChange: (location: Location) => void;
   wearingItems: ClothingItem[];
@@ -614,21 +939,15 @@ function OutfitChangeDialog({
               </div>
               <span className="selection-count">{putAwayCount} selected</span>
             </div>
-            {wearingItems.length ? (
-              <div className="outfit-selection-list">
-                {wearingItems.map((item) => (
-                  <OutfitSelectionRow
-                    key={item.id}
-                    item={item}
-                    quantity={putAway[item.id] ?? 0}
-                    onChange={(quantity) => onPutAwayChange(item.id, quantity)}
-                    actionLabel="Put away"
-                  />
-                ))}
-              </div>
-            ) : (
-              <p className="outfit-selection-empty">Nothing is currently marked as wearing.</p>
-            )}
+            <TransitItemPicker
+              idPrefix="change-put-away"
+              items={wearingItems}
+              taxonomy={taxonomy}
+              selected={putAway}
+              onSelectionChange={onPutAwayChange}
+              actionLabel="Put away"
+              emptyMessage="Nothing is currently marked as wearing."
+            />
           </section>
           <section className="outfit-selection-section" aria-labelledby="put-on-title">
             <div className="outfit-selection-heading">
@@ -638,21 +957,15 @@ function OutfitChangeDialog({
               </div>
               <span className="selection-count">{putOnCount} selected</span>
             </div>
-            {locationItems.length ? (
-              <div className="outfit-selection-list">
-                {locationItems.map((item) => (
-                  <OutfitSelectionRow
-                    key={item.id}
-                    item={item}
-                    quantity={putOn[item.id] ?? 0}
-                    onChange={(quantity) => onPutOnChange(item.id, quantity)}
-                    actionLabel="Put on"
-                  />
-                ))}
-              </div>
-            ) : (
-              <p className="outfit-selection-empty">No pieces are stored at this location.</p>
-            )}
+            <TransitItemPicker
+              idPrefix="change-put-on"
+              items={locationItems}
+              taxonomy={taxonomy}
+              selected={putOn}
+              onSelectionChange={onPutOnChange}
+              actionLabel="Put on"
+              emptyMessage="No pieces are stored at this location."
+            />
           </section>
           <p className="transit-preview" role="status" aria-live="polite">
             {putAwayCount || putOnCount
@@ -663,6 +976,95 @@ function OutfitChangeDialog({
           <div className="dialog-actions">
             <button className="secondary-button" type="button" onClick={onClose}>Cancel</button>
             <button className="save-button" type="submit" disabled={!hasSelection}>Apply outfit change</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function TransitActionDialog({
+  dialogRef,
+  mode,
+  locations,
+  taxonomy,
+  location,
+  onLocationChange,
+  items,
+  selected,
+  onSelectionChange,
+  onClose,
+  onSubmit,
+  error,
+}: {
+  dialogRef: RefObject<HTMLElement | null>;
+  mode: "start" | "arrival";
+  locations: WardrobeLocation[];
+  taxonomy: WardrobeTaxonomy;
+  location: Location | "";
+  onLocationChange: (location: Location | "") => void;
+  items: ClothingItem[];
+  selected: Record<string, number>;
+  onSelectionChange: (itemId: string, quantity: number) => void;
+  onClose: () => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  error: string;
+}) {
+  const isStart = mode === "start";
+  const locationName = location ? getLocationName(location, locations) : "a destination";
+  const selectedCount = Object.values(selected).reduce((total, quantity) => total + quantity, 0);
+  const hasSelection = selectedCount > 0;
+  const title = isStart ? "Start transit" : "Confirm arrival";
+  const actionLabel = isStart ? "Start transit" : "Confirm arrival";
+  const dialogTitleId = `${mode}-transit-dialog-title`;
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+      <section ref={dialogRef} className="item-dialog transit-dialog transit-action-dialog" role="dialog" aria-modal="true" aria-labelledby={dialogTitleId}>
+        <div className="dialog-heading">
+          <div>
+            <p className="section-label">Transit</p>
+            <h2 id={dialogTitleId}>{title}</h2>
+          </div>
+          <button className="dialog-close" type="button" onClick={onClose} aria-label={`Close ${title.toLocaleLowerCase()} dialog`}>
+            <X size={19} aria-hidden="true" />
+          </button>
+        </div>
+        <form className="item-form transit-form" onSubmit={onSubmit}>
+          <p className="transit-intro">
+            {isStart
+              ? "Choose the clothes you are wearing as you leave a wardrobe location. They will be counted as Currently wearing until you confirm arrival."
+              : "Choose where you have arrived and the pieces that are no longer travelling. Anything left unselected will stay Currently wearing."}
+          </p>
+          <label>
+            {isStart ? "Starting location" : "Arriving at"}
+            <select value={location} onChange={(event) => onLocationChange(event.target.value as Location | "")}>
+              {!isStart ? <option value="">Choose a location</option> : null}
+              {locations.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
+            </select>
+          </label>
+          <TransitItemPicker
+            idPrefix={`${mode}-transit`}
+            items={items}
+            taxonomy={taxonomy}
+            selected={selected}
+            onSelectionChange={onSelectionChange}
+            actionLabel={isStart ? "Take" : "Arrive with"}
+            emptyMessage={isStart ? "No pieces are stored at this location." : "Nothing is currently marked as wearing."}
+          />
+          <p className="transit-preview" role="status" aria-live="polite">
+            {hasSelection && location
+              ? isStart
+                ? `${selectedCount} ${selectedCount === 1 ? "piece" : "pieces"} from ${locationName} → Currently wearing`
+                : `${selectedCount} ${selectedCount === 1 ? "piece" : "pieces"} from Currently wearing → ${locationName}`
+              : isStart
+                ? "Select at least one piece to start transit."
+                : "Choose an arrival location and at least one piece to confirm arrival."}
+          </p>
+          {error ? <p className="form-error" role="alert">{error}</p> : null}
+          <div className="dialog-actions">
+            <button className="secondary-button" type="button" onClick={onClose}>Cancel</button>
+            <button className="save-button" type="submit" disabled={!hasSelection || (!isStart && !location)}>{actionLabel}</button>
           </div>
         </form>
       </section>
@@ -1322,6 +1724,14 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   const [hasLoadedBoard, setHasLoadedBoard] = useState(false);
   const [mobileAddLocation, setMobileAddLocation] = useState<Location>("girlfriend");
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [startTransitDialogOpen, setStartTransitDialogOpen] = useState(false);
+  const [startTransitLocation, setStartTransitLocation] = useState<Location>("girlfriend");
+  const [startTransitSelections, setStartTransitSelections] = useState<Record<string, number>>({});
+  const [startTransitError, setStartTransitError] = useState("");
+  const [arrivalDialogOpen, setArrivalDialogOpen] = useState(false);
+  const [arrivalLocation, setArrivalLocation] = useState<Location | "">("");
+  const [arrivalSelections, setArrivalSelections] = useState<Record<string, number>>({});
+  const [arrivalError, setArrivalError] = useState("");
   const [outfitDialogOpen, setOutfitDialogOpen] = useState(false);
   const [outfitLocation, setOutfitLocation] = useState<Location>("girlfriend");
   const [outfitPutAway, setOutfitPutAway] = useState<Record<string, number>>({});
@@ -1364,6 +1774,8 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   const [editingGarmentType, setEditingGarmentType] = useState<{ occasion: string; garmentGroup: GarmentGroup; name: string } | null>(null);
   const [garmentTypeEditValue, setGarmentTypeEditValue] = useState("");
   const dialogRef = useRef<HTMLElement | null>(null);
+  const startTransitDialogRef = useRef<HTMLElement | null>(null);
+  const arrivalDialogRef = useRef<HTMLElement | null>(null);
   const outfitDialogRef = useRef<HTMLElement | null>(null);
   const transferDialogRef = useRef<HTMLElement | null>(null);
   const taxonomyDialogRef = useRef<HTMLElement | null>(null);
@@ -1413,20 +1825,18 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   const shouldShowNameSuggestion = Boolean(suggestedItemName && suggestedItemName !== form.name.trim());
   const garmentTypeFilterOptions = getAllGarmentTypeOptions(items, taxonomy, occasionFilter, garmentGroupFilter);
   const brandFilterOptions = getBrandOptions(items, brandFilter !== "all" && brandFilter !== "Unspecified" ? brandFilter : "");
-  const filteredItems = items.filter((item) => {
-    const itemOccasions = normalizeStoredOccasions(item.occasions, item.occasion);
-    const matchesOccasion = occasionFilter === "all" || itemOccasions.includes(occasionFilter);
-    const matchesGarmentGroup = garmentGroupFilter === "all" || item.garmentGroup === garmentGroupFilter;
-    const matchesGarmentType = garmentTypeFilter === "all" || item.garmentType === garmentTypeFilter;
-    const matchesColour = colourFilter === "all" || item.colour === colourFilter;
-    const matchesBrand = brandFilter === "all"
-      || (brandFilter === "Unspecified" ? !item.brand : item.brand.toLocaleLowerCase() === brandFilter.toLocaleLowerCase());
-    const haystack = `${item.name} ${itemOccasions.join(" ")} ${item.garmentGroup} ${item.garmentType} ${item.colour} ${item.brand} ${item.notes}`.toLocaleLowerCase();
-    return matchesOccasion && matchesGarmentGroup && matchesGarmentType && matchesColour && matchesBrand && (!normalizedSearch || haystack.includes(normalizedSearch));
+  const filteredItems = filterClothingItems(items, {
+    searchQuery,
+    occasion: occasionFilter,
+    garmentGroup: garmentGroupFilter,
+    garmentType: garmentTypeFilter,
+    colour: colourFilter,
+    brand: brandFilter,
   });
   const activeItem = activeId ? items.find((item) => item.id === activeId) ?? null : null;
   const currentTransferItem = transferItem ? items.find((item) => item.id === transferItem.id) ?? null : null;
   const wearingItems = getItemsForLocation(items, "wearing");
+  const startTransitItems = getItemsForLocation(items, startTransitLocation);
   const outfitLocationItems = getItemsForLocation(items, outfitLocation);
   const saveDisabled = !isDirty || !hasLoadedBoard || state === "loading" || state === "saving";
   const statusLabel = state === "loading"
@@ -1596,7 +2006,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
       window.removeEventListener("resize", scheduleMeasurement);
       rootStyle.removeProperty("--mobile-save-bar-height");
     };
-  }, [hasLoadedBoard, items.length, filteredItems.length, dialogOpen, outfitDialogOpen, transferItem, taxonomyDialogOpen, photoPreview, locations]);
+  }, [hasLoadedBoard, items.length, filteredItems.length, dialogOpen, startTransitDialogOpen, arrivalDialogOpen, outfitDialogOpen, transferItem, taxonomyDialogOpen, photoPreview, locations]);
 
   useEffect(() => {
     if (!hasLoadedBoard) return;
@@ -1659,6 +2069,14 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
     setBrowsePaths({ girlfriend: {}, home: {} });
     setExpandedItemId(null);
     setDialogOpen(false);
+    setStartTransitDialogOpen(false);
+    setStartTransitLocation("girlfriend");
+    setStartTransitSelections({});
+    setStartTransitError("");
+    setArrivalDialogOpen(false);
+    setArrivalLocation("");
+    setArrivalSelections({});
+    setArrivalError("");
     setOutfitDialogOpen(false);
     setOutfitLocation("girlfriend");
     setOutfitPutAway({});
@@ -1872,6 +2290,22 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
     setTransferError("");
   }
 
+  function openStartTransitDialog() {
+    dialogReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setStartTransitLocation(mobileAddLocation);
+    setStartTransitSelections({});
+    setStartTransitError("");
+    setStartTransitDialogOpen(true);
+  }
+
+  function openArrivalDialog() {
+    dialogReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setArrivalLocation("");
+    setArrivalSelections(Object.fromEntries(wearingItems.map((item) => [item.id, item.quantity])));
+    setArrivalError("");
+    setArrivalDialogOpen(true);
+  }
+
   function openOutfitDialog() {
     dialogReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setOutfitPutAway({});
@@ -1906,6 +2340,16 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
     setTransferError("");
   }
 
+  function closeStartTransitDialog() {
+    setStartTransitDialogOpen(false);
+    setStartTransitError("");
+  }
+
+  function closeArrivalDialog() {
+    setArrivalDialogOpen(false);
+    setArrivalError("");
+  }
+
   function closeOutfitDialog() {
     setOutfitDialogOpen(false);
     setOutfitError("");
@@ -1915,6 +2359,58 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
     setOutfitLocation(location);
     setOutfitPutOn({});
     setOutfitError("");
+  }
+
+  function updateStartTransitSelection(itemId: string, quantity: number) {
+    setStartTransitSelections((current) => {
+      const next = { ...current };
+      if (quantity > 0) next[itemId] = quantity;
+      else delete next[itemId];
+      return next;
+    });
+    setStartTransitError("");
+  }
+
+  function updateArrivalSelection(itemId: string, quantity: number) {
+    setArrivalSelections((current) => {
+      const next = { ...current };
+      if (quantity > 0) next[itemId] = quantity;
+      else delete next[itemId];
+      return next;
+    });
+    setArrivalError("");
+  }
+
+  function completeStartTransit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const selections: OutfitSelection[] = Object.entries(startTransitSelections).map(([itemId, quantity]) => ({ itemId, quantity }));
+    try {
+      const nextItems = applyStartTransit(items, startTransitLocation, selections, createItemId);
+      setItems(nextItems);
+      const total = selections.reduce((sum, selection) => sum + selection.quantity, 0);
+      setAnnouncement(`${total} ${total === 1 ? "piece" : "pieces"} started transit from ${getLocationName(startTransitLocation, locations)} and is now marked Currently wearing. Changes are unsaved.`);
+      closeStartTransitDialog();
+    } catch (error) {
+      setStartTransitError(error instanceof Error ? error.message : "Unable to start transit.");
+    }
+  }
+
+  function completeArrival(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!arrivalLocation) {
+      setArrivalError("Choose the location where you arrived.");
+      return;
+    }
+    const selections: OutfitSelection[] = Object.entries(arrivalSelections).map(([itemId, quantity]) => ({ itemId, quantity }));
+    try {
+      const nextItems = applyArrival(items, arrivalLocation, selections, createItemId);
+      setItems(nextItems);
+      const total = selections.reduce((sum, selection) => sum + selection.quantity, 0);
+      setAnnouncement(`${total} ${total === 1 ? "piece" : "pieces"} arrived at ${getLocationName(arrivalLocation, locations)}. Changes are unsaved.`);
+      closeArrivalDialog();
+    } catch (error) {
+      setArrivalError(error instanceof Error ? error.message : "Unable to confirm arrival.");
+    }
   }
 
   function updateOutfitSelection(
@@ -2275,13 +2771,25 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   }
 
   useEffect(() => {
-    if (!dialogOpen && !outfitDialogOpen && !transferItem && !taxonomyDialogOpen && !photoPreview) return;
+    if (!dialogOpen && !startTransitDialogOpen && !arrivalDialogOpen && !outfitDialogOpen && !transferItem && !taxonomyDialogOpen && !photoPreview) return;
 
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
 
     const focusableSelector = "button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex=\"-1\"])";
-    const activeDialogRef = dialogOpen ? dialogRef : outfitDialogOpen ? outfitDialogRef : transferItem ? transferDialogRef : taxonomyDialogOpen ? taxonomyDialogRef : photoDialogRef;
+    const activeDialogRef = dialogOpen
+      ? dialogRef
+      : startTransitDialogOpen
+        ? startTransitDialogRef
+        : arrivalDialogOpen
+          ? arrivalDialogRef
+          : outfitDialogOpen
+            ? outfitDialogRef
+            : transferItem
+              ? transferDialogRef
+              : taxonomyDialogOpen
+                ? taxonomyDialogRef
+                : photoDialogRef;
     const focusDialog = () => {
       const firstFocusable = activeDialogRef.current?.querySelector<HTMLElement>(focusableSelector);
       firstFocusable?.focus();
@@ -2292,6 +2800,8 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
       if (event.key === "Escape") {
         event.preventDefault();
         if (dialogOpen) closeDialog();
+        if (startTransitDialogOpen) closeStartTransitDialog();
+        if (arrivalDialogOpen) closeArrivalDialog();
         if (outfitDialogOpen) closeOutfitDialog();
         if (transferItem) closeTransferDialog();
         if (taxonomyDialogOpen) closeTaxonomyDialog();
@@ -2321,7 +2831,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
       dialogReturnFocusRef.current?.focus();
       dialogReturnFocusRef.current = null;
     };
-  }, [dialogOpen, outfitDialogOpen, transferItem, taxonomyDialogOpen, photoPreview]);
+  }, [dialogOpen, startTransitDialogOpen, arrivalDialogOpen, outfitDialogOpen, transferItem, taxonomyDialogOpen, photoPreview]);
 
   function applyKeywordAutofill(current: ItemForm, manualFields: FormManualFields) {
     const suggestion = suggestKeywordClassification(current.name, keywordRules, taxonomy, {
@@ -2710,7 +3220,14 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
         </aside>
       ) : null}
 
-      {hasLoadedBoard ? <WearingPanel items={wearingItems} onChangeOutfit={openOutfitDialog} /> : null}
+      {hasLoadedBoard ? (
+        <WearingPanel
+          items={wearingItems}
+          onStartTransit={openStartTransitDialog}
+          onConfirmArrival={openArrivalDialog}
+          onChangeOutfit={openOutfitDialog}
+        />
+      ) : null}
 
       <section className="board-filters" aria-label="Browse and filter clothing">
         <div className="search-field">
@@ -2861,7 +3378,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
 
       <p className="sr-only" aria-live="polite">{announcement}</p>
 
-      {hasLoadedBoard && !dialogOpen && !outfitDialogOpen && !transferItem && !taxonomyDialogOpen && !photoPreview && !activeId ? (
+      {hasLoadedBoard && !dialogOpen && !startTransitDialogOpen && !arrivalDialogOpen && !outfitDialogOpen && !transferItem && !taxonomyDialogOpen && !photoPreview && !activeId ? (
         <button
           className="mobile-add-button"
           type="button"
@@ -2873,7 +3390,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
         </button>
       ) : null}
 
-      {!dialogOpen ? (
+      {!dialogOpen && !startTransitDialogOpen && !arrivalDialogOpen && !outfitDialogOpen && !transferItem && !taxonomyDialogOpen && !photoPreview ? (
         <div ref={mobileSaveBarRef} className="mobile-save-bar" aria-label="Mobile save controls">
           <div className="mobile-save-status" role="status" aria-live="polite">
             <StatusIcon state={state} dirty={isDirty} />
@@ -3108,10 +3625,51 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
         </div>
       ) : null}
 
+      {startTransitDialogOpen ? (
+        <TransitActionDialog
+          dialogRef={startTransitDialogRef}
+          mode="start"
+          locations={locations}
+          taxonomy={taxonomy}
+          location={startTransitLocation}
+          onLocationChange={(location) => {
+            if (location) {
+              setStartTransitLocation(location);
+              setStartTransitSelections({});
+              setStartTransitError("");
+            }
+          }}
+          items={startTransitItems}
+          selected={startTransitSelections}
+          onSelectionChange={updateStartTransitSelection}
+          onClose={closeStartTransitDialog}
+          onSubmit={completeStartTransit}
+          error={startTransitError}
+        />
+      ) : null}
+
+      {arrivalDialogOpen ? (
+        <TransitActionDialog
+          dialogRef={arrivalDialogRef}
+          mode="arrival"
+          locations={locations}
+          taxonomy={taxonomy}
+          location={arrivalLocation}
+          onLocationChange={(location) => { setArrivalLocation(location); setArrivalError(""); }}
+          items={wearingItems}
+          selected={arrivalSelections}
+          onSelectionChange={updateArrivalSelection}
+          onClose={closeArrivalDialog}
+          onSubmit={completeArrival}
+          error={arrivalError}
+        />
+      ) : null}
+
       {outfitDialogOpen ? (
         <OutfitChangeDialog
           dialogRef={outfitDialogRef}
           locations={locations}
+          taxonomy={taxonomy}
           at={outfitLocation}
           onLocationChange={handleOutfitLocationChange}
           wearingItems={wearingItems}

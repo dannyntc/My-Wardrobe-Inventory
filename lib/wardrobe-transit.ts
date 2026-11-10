@@ -139,3 +139,27 @@ export function applyOutfitChange(
   next = moveSelection(next, change.putOn, change.at, "wearing", createItemId, now);
   return next;
 }
+
+export function applyStartTransit(
+  items: ClothingItem[],
+  source: Location,
+  selections: OutfitSelection[],
+  createItemId: () => string,
+  now = new Date().toISOString(),
+) {
+  if (!selections.length) throw new Error("Select at least one piece to start transit.");
+  validateSelections(items, selections, source);
+  return moveSelection(items.map((item) => ({ ...item })), selections, source, "wearing", createItemId, now);
+}
+
+export function applyArrival(
+  items: ClothingItem[],
+  destination: Location,
+  selections: OutfitSelection[],
+  createItemId: () => string,
+  now = new Date().toISOString(),
+) {
+  if (!selections.length) throw new Error("Select at least one piece to confirm arrival.");
+  validateSelections(items, selections, "wearing");
+  return moveSelection(items.map((item) => ({ ...item })), selections, "wearing", destination, createItemId, now);
+}
