@@ -56,6 +56,16 @@ test("starts transit from either physical location and preserves the total", () 
   assert.equal(result.reduce((total, candidate) => total + candidate.quantity, 0), 2);
 });
 
+test("records transit destination and keeps separate destinations separate", () => {
+  const items = [item({ id: "shirt", name: "White tee", quantity: 2, location: "home" })];
+
+  const first = applyStartTransit(items, "home", [{ itemId: "shirt", quantity: 1 }], createId, "2026-01-07T00:00:00.000Z", "girlfriend");
+  const second = applyStartTransit(first, "home", [{ itemId: "shirt", quantity: 1 }], createId, "2026-01-07T00:01:00.000Z", "home");
+
+  assert.equal(second.filter((candidate) => candidate.location === "wearing").length, 2);
+  assert.deepEqual(second.filter((candidate) => candidate.location === "wearing").map((candidate) => candidate.transitDestination).sort(), ["girlfriend", "home"]);
+});
+
 test("confirms arrival at the opposite location and merges matching pieces", () => {
   const items = [
     item({ id: "worn", name: "White tee", quantity: 1, location: "wearing" }),
@@ -79,4 +89,5 @@ test("confirms a return to the original source and leaves partial transit wearin
 
   assert.equal(result.find((candidate) => candidate.location === "home")?.quantity, 2);
   assert.equal(result.find((candidate) => candidate.location === "wearing")?.quantity, 1);
+  assert.equal(result.find((candidate) => candidate.location === "home")?.transitDestination, undefined);
 });

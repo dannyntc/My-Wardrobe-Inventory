@@ -34,11 +34,17 @@ function canMerge(left: ClothingItem, right: ClothingItem) {
     && left.garmentType.trim().toLocaleLowerCase() === right.garmentType.trim().toLocaleLowerCase()
     && left.colour.toLocaleLowerCase() === right.colour.toLocaleLowerCase()
     && left.brand.trim().toLocaleLowerCase() === right.brand.trim().toLocaleLowerCase()
-    && left.photo?.pathname === right.photo?.pathname;
+    && left.photo?.pathname === right.photo?.pathname
+    && (left.location !== "wearing" || right.location !== "wearing" || left.transitDestination === right.transitDestination);
 }
 
 function mergeNotes(left: string, right: string) {
   return [left, right].filter(Boolean).filter((note, index, notes) => notes.indexOf(note) === index).join(" · ");
+}
+
+function clearTransitDestination(item: ClothingItem) {
+  const { transitDestination: _transitDestination, ...withoutDestination } = item;
+  return withoutDestination;
 }
 
 function validateSelections(items: ClothingItem[], selections: OutfitSelection[], source: InventoryLocation) {
@@ -69,6 +75,7 @@ function moveSelection(
   destination: InventoryLocation,
   createItemId: () => string,
   now: string,
+  transitDestination?: Location,
 ) {
   let next = items;
   for (const selection of selections) {
@@ -77,7 +84,7 @@ function moveSelection(
       throw new Error("The board changed while the outfit dialog was open. Close this dialog and try again.");
     }
 
-    const destinationItem = next.find((item) => item.id !== sourceItem.id && item.location === destination && canMerge(sourceItem, item));
+    const destinationItem = next.find((item) => item.id !== sourceItem.id && item.location === destination && canMerge(sourceItem, item) && (destination !== "wearing" || item.transitDestination === transitDestination));
     if (destinationItem && destinationItem.quantity + selection.quantity > MAX_QUANTITY) {
       throw new Error(`${destinationItem.name} cannot exceed ${MAX_QUANTITY} pieces at ${locationLabel[destination]}.`);
     }
@@ -100,7 +107,7 @@ function moveSelection(
 
     if (remainingQuantity === 0) {
       next = next.map((item) => item.id === sourceItem.id
-        ? { ...item, location: destination, updatedAt: now }
+        ? { ...(destination === "wearing" ? item : clearTransitDestination(item)), location: destination, ...(destination === "wearing" && transitDestination ? { transitDestination } : {}), updatedAt: now }
         : item);
       continue;
     }
@@ -109,7 +116,7 @@ function moveSelection(
       ...next.map((item) => item.id === sourceItem.id
         ? { ...item, quantity: remainingQuantity, updatedAt: now }
         : item),
-      { ...sourceItem, id: createItemId(), quantity: selection.quantity, location: destination, createdAt: now, updatedAt: now },
+      { ...(destination === "wearing" ? sourceItem : clearTransitDestination(sourceItem)), id: createItemId(), quantity: selection.quantity, location: destination, ...(destination === "wearing" && transitDestination ? { transitDestination } : {}), createdAt: now, updatedAt: now },
     ];
   }
   if (next.length > MAX_ITEM_RECORDS) throw new Error(`This change would create more than ${MAX_ITEM_RECORDS} item records.`);
@@ -122,10 +129,11 @@ export function applyStartTransit(
   selections: OutfitSelection[],
   createItemId: () => string,
   now = new Date().toISOString(),
+  transitDestination?: Location,
 ) {
   if (!selections.length) throw new Error("Select at least one piece to start transit.");
   validateSelections(items, selections, source);
-  return moveSelection(items.map((item) => ({ ...item })), selections, source, "wearing", createItemId, now);
+  return moveSelection(items.map((item) => ({ ...item })), selections, source, "wearing", createItemId, now, transitDestination);
 }
 
 export function applyArrival(
