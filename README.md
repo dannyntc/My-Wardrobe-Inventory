@@ -1,6 +1,6 @@
 # Wardrobe Inventory
 
-[Open the live demo](https://wardrobe-inventory-demo.vercel.app)
+[Open the live demo](https://wardrobe-inventory-danny.vercel.app/demo)
 
 The demo uses fictional starter data, generic location labels, bundled sample illustrations, and browser-only saving. It does not access the personal wardrobe or share edits between visitors.
 
@@ -30,7 +30,7 @@ _Overview: browse by location and occasion, switch between Overview and List, se
 
 5. **Save or reset the demo.** Select **Save changes** to keep your draft in the current browser. Demo changes are local to that browser and do not affect the personal wardrobe or another visitor’s demo. Select **Reset demo** to restore the fictional starter board.
 
-6. **Track an outfit in transit.** Select **Start transit**, choose the source location, and use the same search, filters, Overview, or List browsing as the main board to select the pieces you are wearing. Later, select **Confirm arrival**, choose either physical location—including the place you returned to—and review the simple list of worn pieces. All worn pieces start selected; adjust quantities when only part of the outfit arrived. Any pieces left unselected remain in **Currently wearing**. Use the inline **− / +** controls beside a worn piece to adjust its quantity while it is in transit; its location stays Wearing until arrival is confirmed. At quantity 1, **−** asks for confirmation before removing the item, and **Remove** provides the same explicit deletion action.
+6. **Track an outfit in transit.** Select **Start transit**, choose the source and intended destination, and use the same search, filters, Overview, or List browsing as the main board to select the pieces you are wearing. Later, select **Confirm arrival**, choose either physical location—including the place you returned to—and review the simple list of worn pieces. All worn pieces start selected; adjust quantities when only part of the outfit arrived. Any pieces left unselected remain in **Currently wearing**. Use the inline **− / +** controls beside a worn piece to adjust its quantity while it is in transit, and update a travelling piece’s destination when plans change. Items with a destination count toward that location’s minimum clothing requirements immediately; unassigned legacy transit items count toward neither location until assigned. At quantity 1, **−** asks for confirmation before removing the item, and **Remove** provides the same explicit deletion action.
 
 This project provides a shared men’s wardrobe inventory across two locations:
 
@@ -39,6 +39,7 @@ This project provides a shared men’s wardrobe inventory across two locations:
 - `/api/content` runs as a Vercel server function.
 - Vercel Blob stores the clothing board at `content/home.json` and private item photos under `content/photos/`.
 - The board has two fixed physical locations plus a `wearing` state for pieces currently travelling between them. The physical stored IDs remain `girlfriend` and `home` so existing entries keep their locations; private deployments can provide their own labels through environment variables.
+- Set a minimum quantity for a specific clothing item at either physical location from the Location coverage panel. The board flags a shortage when stored pieces plus pieces in transit to that destination are below the minimum.
 - The wardrobe taxonomy is organized as occasion → garment group (`Tops`, `Bottoms`, `Accessories`, or `Other`) → garment type, with defaults for Formal, Smart casual, Casual, Home & activewear, and Other. An item may be tagged as both Formal and Smart casual.
 - Manage occasions and garment types from the board. Create, rename, or delete them; deleting a definition reassigns affected items to the nearest `Other` fallback.
 - Add, edit, disable, or delete keyword autofill rules from Manage wardrobe structure. While adding or editing a piece, matching whole words or phrases in its name pre-fill the selected occasion, group, garment type, brand, and/or colour; manual choices stay protected and automatic fields reset when their matching words are removed.
@@ -48,9 +49,9 @@ This project provides a shared men’s wardrobe inventory across two locations:
 
 ## Public demo mode
 
-The [public demo](https://wardrobe-inventory-demo.vercel.app) uses the same codebase with a separate Vercel project and `WARDROBE_MODE=demo`. It loads only fictional starter items and generic bundled illustrations. Board edits are saved in the visitor’s browser under demo-only localStorage keys; they are not sent to Vercel Blob, do not sync between visitors or devices, and can be removed with Reset demo. Demo mode blocks `/api/content`, `/api/uploads`, and `/api/photos` before any Blob operation.
+The [public demo](https://wardrobe-inventory-danny.vercel.app/demo) uses the same styled page and fictional starter data. Board edits are saved in the visitor’s browser under demo-only localStorage keys; they do not change the personal board or sync between visitors or devices, and can be removed with Reset demo. The demo page uses no content, upload, or photo API calls.
 
-Keep `WARDROBE_MODE` unset or set it to `personal` for a private deployment. Set the four `WARDROBE_LOCATION_*` variables and `WARDROBE_BRAND_LABEL` in that deployment’s environment; keep their values out of source control. The demo project must not be connected to the personal Blob store and does not need `BLOB_READ_WRITE_TOKEN`.
+Keep `WARDROBE_MODE` unset or set it to `personal` for the root private deployment. Set the four `WARDROBE_LOCATION_*` variables and `WARDROBE_BRAND_LABEL` in that deployment’s environment; keep their values out of source control. The `/demo` route remains browser-only because it renders the demo configuration directly and does not call the content, upload, or photo APIs.
 
 ## Local setup
 
@@ -76,7 +77,7 @@ Saved wardrobe data is kept separate from the repository and is never written by
 
 ```json
 {
-  "schemaVersion": 8,
+  "schemaVersion": 9,
   "keywordRules": [
     {
       "id": "default-t-shirts",
@@ -97,6 +98,19 @@ Saved wardrobe data is kept separate from the repository and is never written by
       }
     }
   },
+  "minimums": [
+    {
+      "id": "minimum-id",
+      "location": "home",
+      "name": "Black overshirt",
+      "occasions": ["Smart casual"],
+      "garmentGroup": "Tops",
+      "garmentType": "Overshirts",
+      "colour": "Black",
+      "brand": "UNIQLO",
+      "minimum": 2
+    }
+  ],
   "items": [
     {
       "id": "item-id",
@@ -124,9 +138,9 @@ Saved wardrobe data is kept separate from the repository and is never written by
 }
 ```
 
-The API accepts previous board formats without rewriting them automatically. On load, legacy category/subcategory entries are copied into the current draft as `Other` → `Other` → `Other`, marked with `needsClassification: true`, and their previous classification is appended to their notes. Existing v2 and v3 boards receive default colour values of `Unspecified`, v4 boards receive an empty brand, v5 boards receive the new Accessories taxonomy and normalized garment types, v6 boards receive normalized `occasions` arrays in memory, and v7 boards gain an empty `wearing` state in memory; older boards are upgraded to the current schema only on an explicit Save. Existing `Other` → `Accessories`, `Other` → `Belts`, and `Other` → `Towels` items move to the Accessories group, while Home & activewear `T-shirts` and `Workout tops` become `T-shirts / workout tops`. The original Blob remains untouched until then, and that replacement first creates an exact private backup. Documents with a newer schema are rejected without overwriting the current record.
+The API accepts previous board formats without rewriting them automatically. On load, legacy category/subcategory entries are copied into the current draft as `Other` → `Other` → `Other`, marked with `needsClassification: true`, and their previous classification is appended to their notes. Existing v2 and v3 boards receive default colour values of `Unspecified`, v4 boards receive an empty brand, v5 boards receive the new Accessories taxonomy and normalized garment types, v6 boards receive normalized `occasions` arrays in memory, v7 boards gain an empty `wearing` state in memory, and v8 boards gain empty minimum settings in memory. Existing wearing items without a destination remain unassigned until you choose one in the transit panel; they do not count toward a location minimum. Older boards are upgraded to the current schema only on an explicit Save. Existing `Other` → `Accessories`, `Other` → `Belts`, and `Other` → `Towels` items move to the Accessories group, while Home & activewear `T-shirts` and `Workout tops` become `T-shirts / workout tops`. The original Blob remains untouched until then, and that replacement first creates an exact private backup. Documents with a newer schema are rejected without overwriting the current record.
 
-Items with the same name, occasion, garment group, garment type, colour, brand, and location are combined when added again and when the board loads; `quantity` is the total number of pieces in that group. Items awaiting classification are kept distinct by ID so migration never merges records accidentally. The `wearing` location is counted as inventory, edited in place, and moved through Start transit and Confirm arrival. Colours use a searchable autocomplete against the standard colour list, and both colour and brand can filter the board on desktop and mobile.
+Items with the same name, occasion, garment group, garment type, colour, brand, and location are combined when added again and when the board loads; `quantity` is the total number of pieces in that group. Travelling pieces are also kept separate by transit destination so minimum counts remain accurate. Items awaiting classification are kept distinct by ID so migration never merges records accidentally. The `wearing` location is counted as inventory, edited in place, and moved through Start transit and Confirm arrival. Transit destinations are stored per travelling item so minimum counts can include the expected arrival. Colours use a searchable autocomplete against the standard colour list, and both colour and brand can filter the board on desktop and mobile.
 
 The API recognizes the old page-shaped Blob document as legacy content, returns an empty unsaved board, and does not migrate or overwrite it automatically. The first explicit Save replaces it with the clothing schema.
 
