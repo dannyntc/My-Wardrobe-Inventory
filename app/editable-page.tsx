@@ -101,9 +101,10 @@ import {
 } from "../lib/keyword-rules";
 import { formatItemName, getSuggestedItemName } from "../lib/wardrobe-names";
 import { canUseDemoStorage, clearDemoRecord, DEMO_DRAFT_KEY, DEMO_SAVED_BOARD_KEY, readDemoRecord, writeDemoRecord } from "../lib/demo-storage";
-import type { ClothingItem, InventoryLocation, Location, PhotoReference, WardrobeLocation } from "../lib/wardrobe-types";
+import type { ClothingItem, InventoryLocation, Location, PhotoReference, WardrobeLocation, WardrobeMinimum } from "../lib/wardrobe-types";
 import type { DemoStarterContent } from "../lib/demo-fixture";
 import { applyArrival, applyStartTransit, type OutfitSelection } from "../lib/wardrobe-transit";
+import { applyMinimumQuantityEdits, getLocationMinimumSummary, getMinimumCoverage, getMinimumEditorItems, getMinimumEditorLocations, getMinimumSettingSignature, getMinimumSignature, getMinimumStatuses, makeMinimumFromItem, minimumMatchesItem, normalizeMinimumEditorQuantity, reconcileMinimumExpansion, type MinimumEditorMode, type MinimumStatus } from "../lib/wardrobe-minimums";
 
 type LoadState = "loading" | "ready" | "saving" | "error";
 type ViewMode = "overview" | "list";
@@ -143,7 +144,7 @@ type KeywordRuleDraft = {
   enabled: boolean;
 };
 
-const BOARD_SCHEMA_VERSION = 8;
+const BOARD_SCHEMA_VERSION = 9;
 const DRAFT_STORAGE_KEY = "wardrobe-inventory-unsaved-draft-v2";
 
 export type WardrobePageConfig = {
@@ -198,8 +199,8 @@ function getPhotoExtension(contentType: PhotoReference["contentType"]) {
   return contentType === "image/jpeg" ? "jpg" : contentType === "image/png" ? "png" : "webp";
 }
 
-function serializeBoard(items: ClothingItem[], taxonomy: WardrobeTaxonomy, keywordRules: KeywordRule[]) {
-  return JSON.stringify({ schemaVersion: BOARD_SCHEMA_VERSION, items, taxonomy, keywordRules });
+function serializeBoard(items: ClothingItem[], taxonomy: WardrobeTaxonomy, keywordRules: KeywordRule[], minimums: WardrobeMinimum[]) {
+  return JSON.stringify({ schemaVersion: BOARD_SCHEMA_VERSION, items, taxonomy, keywordRules, minimums });
 }
 
 type SavedDraft = {
@@ -208,6 +209,7 @@ type SavedDraft = {
   items: ClothingItem[];
   taxonomy: WardrobeTaxonomy;
   keywordRules: KeywordRule[];
+  minimums: WardrobeMinimum[];
   migrationRequired: boolean;
 };
 
@@ -217,7 +219,7 @@ function readSavedDraft(): SavedDraft | null {
     const value = JSON.parse(window.localStorage.getItem(DRAFT_STORAGE_KEY) || "null") as Partial<SavedDraft> | null;
     if (
       !value ||
-      (value.schemaVersion !== 2 && value.schemaVersion !== 3 && value.schemaVersion !== 4 && value.schemaVersion !== 5 && value.schemaVersion !== 6 && value.schemaVersion !== 7 && value.schemaVersion !== BOARD_SCHEMA_VERSION) ||
+      (value.schemaVersion !== 2 && value.schemaVersion !== 3 && value.schemaVersion !== 4 && value.schemaVersion !== 5 && value.schemaVersion !== 6 && value.schemaVersion !== 7 && value.schemaVersion !== 8 && value.schemaVersion !== BOARD_SCHEMA_VERSION) ||
       !Array.isArray(value.items) ||
       !value.taxonomy ||
       (value.keywordRules !== undefined && !Array.isArray(value.keywordRules)) ||
@@ -228,6 +230,7 @@ function readSavedDraft(): SavedDraft | null {
       ...(value as SavedDraft),
       schemaVersion: BOARD_SCHEMA_VERSION,
       keywordRules: Array.isArray(value.keywordRules) ? value.keywordRules : cloneDefaultKeywordRules(),
+      minimums: Array.isArray(value.minimums) ? value.minimums : [],
       migrationRequired: value.migrationRequired || value.schemaVersion !== BOARD_SCHEMA_VERSION,
     };
   } catch {
@@ -263,6 +266,15 @@ function formatDate(value: string | null) {
 function createItemId() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
   return `item-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function getMinimumQuantityKey(location: Location, signature: string) {
+  return `${location}::${signature}`;
+}
+
+function numericMinimumQuantity(value: string) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 999 ? parsed : 0;
 }
 
 function getItemsForLocation(items: ClothingItem[], location: InventoryLocation) {
@@ -398,6 +410,7 @@ function normalizeItem(item: ClothingItem) {
     brand: normalizeBrand(item.brand),
     needsClassification: item.needsClassification === true,
     quantity: Math.max(1, item.quantity ?? 1),
+    ...(item.location === "wearing" && item.transitDestination ? { transitDestination: item.transitDestination } : {}),
   };
 }
 
@@ -417,7 +430,7 @@ function aggregateItems(items: ClothingItem[]) {
       continue;
     }
     const occasionKey = normalizedItem.occasions.map((occasion) => occasion.toLocaleLowerCase()).sort().join("|");
-    const key = `${normalizedItem.location}::${normalizedItem.name.trim().toLocaleLowerCase()}::${occasionKey}::${normalizedItem.garmentGroup.toLocaleLowerCase()}::${normalizedItem.garmentType.trim().toLocaleLowerCase()}::${normalizedItem.colour.toLocaleLowerCase()}::${normalizedItem.brand.toLocaleLowerCase()}::${normalizedItem.photo?.pathname ?? ""}`;
+    const key = `${normalizedItem.location}::${normalizedItem.location === "wearing" ? normalizedItem.transitDestination ?? "unassigned" : ""}::${normalizedItem.name.trim().toLocaleLowerCase()}::${occasionKey}::${normalizedItem.garmentGroup.toLocaleLowerCase()}::${normalizedItem.garmentType.trim().toLocaleLowerCase()}::${normalizedItem.colour.toLocaleLowerCase()}::${normalizedItem.brand.toLocaleLowerCase()}::${normalizedItem.photo?.pathname ?? ""}`;
     const existing = groups.get(key);
     if (!existing) {
       groups.set(key, normalizedItem);
@@ -825,17 +838,522 @@ function TransitItemPicker({
   );
 }
 
+function MinimumsPanel({
+  statuses,
+  locations,
+  onAdd,
+  onBulkEdit,
+  onEdit,
+  onRemove,
+}: {
+  statuses: MinimumStatus[];
+  locations: WardrobeLocation[];
+  onAdd: () => void;
+  onBulkEdit: () => void;
+  onEdit: (minimum: WardrobeMinimum) => void;
+  onRemove: (minimum: WardrobeMinimum) => void;
+}) {
+  return (
+    <section className="minimums-panel" aria-labelledby="minimums-panel-title">
+      <header className="minimums-panel-heading">
+        <div>
+          <p className="section-label">Location coverage</p>
+          <h2 id="minimums-panel-title">Minimum clothing on hand</h2>
+          <p>Travelling pieces count toward their selected destination.</p>
+        </div>
+        <span className="minimums-panel-actions">
+          <button className="secondary-button" type="button" onClick={onBulkEdit}>
+            <Settings2 size={16} aria-hidden="true" />
+            Edit several
+          </button>
+          <button className="secondary-button" type="button" onClick={onAdd}>
+            <Plus size={16} aria-hidden="true" />
+            Add minimum
+          </button>
+        </span>
+      </header>
+      {statuses.length ? (
+        <div className="minimum-list">
+          {statuses.map((status) => {
+            const locationName = getLocationName(status.location, locations);
+            return (
+              <article className={`minimum-row${status.shortfall ? " minimum-row-alert" : ""}`} key={status.id}>
+                <span className="minimum-row-status" aria-hidden="true">{status.shortfall ? <TriangleAlert size={17} /> : <Check size={17} />}</span>
+                <span className="minimum-row-copy">
+                  <strong>{status.name}</strong>
+                  <span>{status.garmentType}{status.colour !== "Unspecified" ? ` · ${status.colour}` : ""}{status.brand ? ` · ${status.brand}` : ""}</span>
+                </span>
+                <span className="minimum-row-count">
+                  <strong>{status.current + status.inTransit} / {status.minimum}</strong>
+                  <span>{status.shortfall ? `${status.shortfall} short at ${locationName}` : `Covered at ${locationName}`}</span>
+                  {status.inTransit ? <small>{status.current} stored · {status.inTransit} in transit</small> : null}
+                </span>
+                <span className="minimum-row-actions">
+                  <button className="plain-button" type="button" onClick={() => onEdit(status)}>Edit</button>
+                  <button className="plain-button plain-button-danger" type="button" onClick={() => onRemove(status)}>Remove</button>
+                </span>
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="minimums-empty">
+          <strong>No location minimums set</strong>
+          <span>Add a specific clothing item and the number of pieces you want available at either location.</span>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function MinimumShortfallList({
+  location,
+  statuses,
+}: {
+  location: WardrobeLocation;
+  statuses: MinimumStatus[];
+}) {
+  const shortfallStatuses = statuses
+    .filter((status) => status.location === location.id && status.shortfall > 0)
+    .sort((left, right) => right.shortfall - left.shortfall);
+
+  if (!shortfallStatuses.length) return null;
+
+  return (
+    <div className="minimum-shortfall-list" aria-label={`${location.name} minimum shortages`}>
+      {shortfallStatuses.map((status) => (
+        <article className="minimum-shortfall-row" key={status.id}>
+          <span className="minimum-shortfall-copy">
+            <strong>{status.name}</strong>
+            <small>{status.garmentType} · {status.current} stored{status.inTransit ? ` + ${status.inTransit} incoming` : ""}</small>
+          </span>
+          <span className="minimum-shortfall-count">
+            <strong>{status.current + status.inTransit} / {status.minimum}</strong>
+            <small>{status.shortfall} short</small>
+          </span>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function LocationMinimumSummary({
+  location,
+  statuses,
+  onAddMinimum,
+  onEditMinimum,
+}: {
+  location: WardrobeLocation;
+  statuses: MinimumStatus[];
+  onAddMinimum: () => void;
+  onEditMinimum: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const previousShortfallCount = useRef(0);
+  const summary = getLocationMinimumSummary(statuses, location.id);
+  const detail = summary.configured
+    ? `${summary.configured} tracked ${summary.configured === 1 ? "minimum" : "minimums"}`
+    : "Set a target for clothing kept here";
+  const stateClass = summary.belowMinimum ? "location-minimum-strip-alert" : summary.configured ? "location-minimum-strip-covered" : "location-minimum-strip-empty";
+
+  useEffect(() => {
+    setExpanded((current) => reconcileMinimumExpansion(previousShortfallCount.current, summary.belowMinimum, current));
+    previousShortfallCount.current = summary.belowMinimum;
+  }, [summary.belowMinimum]);
+
+  return (
+    <>
+      <div className={`location-minimum-strip ${stateClass}`} aria-label={`${location.name} minimum coverage`}>
+        <div className="location-minimum-copy">
+          <span className="location-minimum-state">
+            {summary.belowMinimum ? <TriangleAlert size={15} aria-hidden="true" /> : summary.configured ? <Check size={15} aria-hidden="true" /> : <Settings2 size={15} aria-hidden="true" />}
+            <strong>{summary.belowMinimum ? `${summary.belowMinimum} below minimum` : summary.configured ? "Minimums covered" : "No minimums set"}</strong>
+          </span>
+          <span className="location-minimum-detail">{detail}{summary.totalShortfall ? ` · ${summary.totalShortfall} ${summary.totalShortfall === 1 ? "piece" : "pieces"} short` : ""}</span>
+        </div>
+        <span className="location-minimum-actions">
+          {summary.belowMinimum ? <button className="plain-button" type="button" aria-expanded={expanded} onClick={() => setExpanded((current) => !current)}>{expanded ? "Collapse" : "Expand"}</button> : null}
+          {summary.configured ? <button className="plain-button" type="button" onClick={onEditMinimum}>Edit minimums</button> : null}
+          <button className="plain-button" type="button" onClick={onAddMinimum}>{summary.configured ? "Add minimum" : "Set minimums"}</button>
+        </span>
+      </div>
+      {expanded && summary.belowMinimum > 0 ? <MinimumShortfallList location={location} statuses={statuses} /> : null}
+    </>
+  );
+}
+
+function MinimumEditorCard({
+  item,
+  location,
+  locations,
+  inventoryItems,
+  quantity,
+  mode,
+  onQuantityChange,
+  onAddMinimum,
+}: {
+  item: ClothingItem;
+  location: Location;
+  locations: WardrobeLocation[];
+  inventoryItems: ClothingItem[];
+  quantity: string;
+  mode: MinimumEditorMode;
+  onQuantityChange: (value: string) => void;
+  onAddMinimum?: () => void;
+}) {
+  const coverage = getMinimumCoverage(item, location, inventoryItems);
+  const occasions = normalizeStoredOccasions(item.occasions, item.occasion);
+  const locationName = getLocationName(location, locations);
+  const signature = getMinimumSignature(item);
+  const parsedMinimum = Number(quantity);
+  const numericQuantity = Number.isInteger(parsedMinimum) ? parsedMinimum : 0;
+  const hasValidMinimum = Number.isInteger(parsedMinimum) && parsedMinimum >= 1 && parsedMinimum <= 999;
+  const isSkipped = mode === "add" && quantity.trim() === "0";
+  const shortfall = hasValidMinimum ? Math.max(0, parsedMinimum - coverage.total) : 0;
+
+  return (
+    <article className="item-card minimum-editor-card">
+      {item.photo ? <img className="photo-thumbnail-static" src={getPhotoUrl(item.photo)} alt="" loading="lazy" /> : <span className="minimum-card-placeholder" aria-hidden="true"><Shirt size={19} /></span>}
+      <div className="item-card-main">
+        <div className="item-card-summary minimum-card-summary">
+          <span className="item-card-summary-copy">
+            <h3>{item.name}</h3>
+            <span className="item-card-summary-type">{item.garmentType}</span>
+          </span>
+          <span className="quantity-chip">× {coverage.total}</span>
+        </div>
+        <div className="minimum-card-details">
+          <div className="item-detail-list">
+            <span className="item-detail"><strong>Occasion</strong>{occasions.join(", ")}</span>
+            <span className="item-detail"><strong>Category</strong>{item.garmentGroup} · {item.garmentType}</span>
+            {item.colour !== "Unspecified" ? <span className="item-detail"><strong>Colour</strong>{item.colour}</span> : null}
+            {item.brand ? <span className="item-detail"><strong>Brand</strong>{item.brand}</span> : null}
+          </div>
+          <label className="minimum-card-input">
+            <span>
+              <strong>Minimum at {locationName}</strong>
+              <small>{coverage.current} stored{coverage.inTransit ? ` · ${coverage.inTransit} in transit` : ""}</small>
+            </span>
+            <span className={mode === "add" ? "minimum-quantity-control" : "minimum-bulk-input-wrap"}>
+              {mode === "add" ? (
+                <button
+                  type="button"
+                  className="minimum-quantity-step"
+                  aria-label={`Decrease minimum for ${item.name} at ${locationName}`}
+                  disabled={numericQuantity <= 0}
+                  onClick={() => onQuantityChange(String(Math.max(0, numericQuantity - 1)))}
+                >
+                  <Minus size={14} aria-hidden="true" />
+                </button>
+              ) : null}
+              <input
+                aria-label={`Minimum for ${item.name} at ${locationName}`}
+                data-minimum-signature={signature}
+                type="number"
+                inputMode="numeric"
+                min={mode === "add" ? "0" : "1"}
+                max="999"
+                placeholder="—"
+                value={quantity}
+                onChange={(event) => onQuantityChange(event.target.value)}
+              />
+              {mode === "add" ? (
+                <button
+                  type="button"
+                  className="minimum-quantity-step"
+                  aria-label={`Increase minimum for ${item.name} at ${locationName}`}
+                  disabled={numericQuantity >= 999}
+                  onClick={() => onQuantityChange(String(Math.min(999, Math.max(0, numericQuantity) + 1)))}
+                >
+                  <Plus size={14} aria-hidden="true" />
+                </button>
+              ) : null}
+              <span>pieces</span>
+            </span>
+          </label>
+          <span className={`minimum-card-status${shortfall ? " minimum-card-status-alert" : ""}${isSkipped ? " minimum-card-status-skipped" : ""}`}>
+            {isSkipped ? `Not adding at ${locationName}` : hasValidMinimum ? shortfall ? `${shortfall} short at ${locationName}` : `Covered at ${locationName}` : mode === "add" ? "No minimum set · enter a quantity to add it" : "No minimum set · blank removes it"}
+          </span>
+          {mode === "add" && onAddMinimum ? (
+            <button className="secondary-button minimum-card-add" type="button" onClick={onAddMinimum} disabled={!hasValidMinimum}>
+              <Plus size={15} aria-hidden="true" />
+              Add minimum
+            </button>
+          ) : null}
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function MinimumLocationOverview({
+  location,
+  locations,
+  items,
+  inventoryItems,
+  taxonomy,
+  browsePath,
+  quantities,
+  listMode,
+  mode,
+  onNavigate,
+  onBack,
+  onQuantityChange,
+  search,
+  onSearchChange,
+  onAddMinimum,
+}: {
+  location: WardrobeLocation;
+  locations: WardrobeLocation[];
+  items: ClothingItem[];
+  inventoryItems: ClothingItem[];
+  taxonomy: WardrobeTaxonomy;
+  browsePath: BrowsePath;
+  quantities: Record<string, string>;
+  listMode: boolean;
+  mode: MinimumEditorMode;
+  onNavigate: (location: Location, path: BrowsePath) => void;
+  onBack: (location: Location) => void;
+  onQuantityChange: (location: Location, signature: string, value: string) => void;
+  search: string;
+  onSearchChange: (value: string) => void;
+  onAddMinimum?: (item: ClothingItem, location: Location, quantity: number) => void;
+}) {
+  const selectedOccasion = browsePath.occasion;
+  const selectedGroup = browsePath.garmentGroup;
+  const itemGroups = (groupItems: ClothingItem[]) => Array.from(new Map(groupItems.map((item) => [item.garmentType, [] as ClothingItem[]])).keys())
+    .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }))
+    .map((garmentType) => ({ garmentType, items: groupItems.filter((item) => item.garmentType === garmentType) }));
+  const piecesAtLocation = items.reduce((total, item) => total + getMinimumCoverage(item, location.id, inventoryItems).total, 0);
+  const renderItemGroups = (groupItems: ClothingItem[], heading: string, countLabel: string) => (
+    <div className="overview-item-groups minimum-editor-item-groups">
+      <div className="overview-section-heading">
+        <div>
+          <p className="section-label">{heading}</p>
+          <h3>{countLabel}</h3>
+        </div>
+        <span>{groupItems.length} {groupItems.length === 1 ? "type" : "types"}</span>
+      </div>
+      {itemGroups(groupItems).map(({ garmentType, items: typeItems }) => (
+        <section className="overview-item-group" key={garmentType}>
+          <header>
+            <h4>{garmentType}</h4>
+            <span>{typeItems.length} {typeItems.length === 1 ? "type" : "types"}</span>
+          </header>
+          <div className="overview-item-list">
+            {typeItems.map((item) => {
+              const signature = getMinimumSignature(item);
+              return (
+                <MinimumEditorCard
+                  key={signature}
+                  item={item}
+                  location={location.id}
+                  locations={locations}
+                  inventoryItems={inventoryItems}
+                  quantity={quantities[getMinimumQuantityKey(location.id, signature)] ?? ""}
+                  mode={mode}
+                  onQuantityChange={(value) => onQuantityChange(location.id, signature, value)}
+                  onAddMinimum={onAddMinimum ? () => onAddMinimum(item, location.id, numericMinimumQuantity(quantities[getMinimumQuantityKey(location.id, signature)] ?? "")) : undefined}
+                />
+              );
+            })}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+
+  return (
+    <section className="location-column overview-column minimum-editor-column" data-tone={location.tone} aria-label={`${location.name} minimums`}>
+      <header className="location-header">
+        <div className="location-title-group">
+          <span className="location-letter" aria-hidden="true">{location.letter}</span>
+          <div>
+            <p className="location-kicker">{location.shortName}</p>
+            <h2>{location.name}</h2>
+          </div>
+        </div>
+        <span className="item-count">{items.length} {items.length === 1 ? "type" : "types"} · {piecesAtLocation} {piecesAtLocation === 1 ? "piece" : "pieces"}</span>
+      </header>
+
+      <div className="overview-body">
+        <div className="minimum-location-search search-field">
+          <Search size={17} aria-hidden="true" />
+          <input type="search" aria-label={`Search ${location.name} clothing`} value={search} onChange={(event) => onSearchChange(event.target.value)} placeholder={`Search ${location.shortName} clothing`} />
+          {search ? <button type="button" className="clear-filter-button" onClick={() => onSearchChange("")} aria-label={`Clear ${location.name} minimum search`}><X size={16} aria-hidden="true" /></button> : null}
+        </div>
+        {selectedOccasion || listMode ? (
+          <button className="overview-back" type="button" onClick={() => onBack(location.id)}>
+            <ChevronLeft size={16} aria-hidden="true" />
+            {selectedGroup ? selectedOccasion : "All occasions"}
+          </button>
+        ) : null}
+        <div className="overview-breadcrumb" aria-live="polite">
+          <span>{location.shortName}</span>
+          {listMode ? <><ChevronRight size={14} aria-hidden="true" /><strong>All clothing</strong></> : selectedOccasion ? <><ChevronRight size={14} aria-hidden="true" /><strong>{selectedGroup ?? selectedOccasion}</strong></> : null}
+        </div>
+
+        {!items.length ? (
+          <div className="minimum-bulk-empty">
+            {mode === "add" ? "No new minimums are available at this location." : "No saved minimums match this view."}
+          </div>
+        ) : listMode ? renderItemGroups(items, "All clothing", "Set minimums by garment type") : !selectedOccasion ? (
+          <div className="overview-grid" aria-label={`${location.name} occasions`}>
+            {taxonomy.occasions.map((occasion) => {
+              const matchingItems = getItemsForOccasion(items, occasion);
+              return <OverviewTile key={occasion} label={occasion} icon={getCategoryIcon(occasion, "occasion")} types={matchingItems.length} pieces={getTotalQuantity(matchingItems)} onClick={() => onNavigate(location.id, { occasion })} />;
+            })}
+          </div>
+        ) : !selectedGroup ? (
+          <div className="overview-grid" aria-label={`${selectedOccasion} garment groups`}>
+            {GARMENT_GROUPS.map((garmentGroup) => {
+              const matchingItems = getItemsForGroup(items, selectedOccasion, garmentGroup);
+              return <OverviewTile key={garmentGroup} label={garmentGroup} icon={getCategoryIcon(garmentGroup, "garmentGroup")} types={matchingItems.length} pieces={getTotalQuantity(matchingItems)} onClick={() => onNavigate(location.id, { occasion: selectedOccasion, garmentGroup })} />;
+            })}
+          </div>
+        ) : renderItemGroups(getItemsForGroup(items, selectedOccasion, selectedGroup), selectedOccasion, selectedGroup)}
+      </div>
+    </section>
+  );
+}
+
+function MinimumEditorDialog({
+  dialogRef,
+  locations,
+  itemOptions,
+  minimums,
+  taxonomy,
+  mode,
+  focusSignature,
+  locationScope,
+  searches,
+  quantities,
+  error,
+  onSearchChange,
+  onQuantityChange,
+  onAddMinimum,
+  onClose,
+  onSubmit,
+}: {
+  dialogRef: RefObject<HTMLElement | null>;
+  locations: WardrobeLocation[];
+  itemOptions: ClothingItem[];
+  minimums: WardrobeMinimum[];
+  taxonomy: WardrobeTaxonomy;
+  mode: MinimumEditorMode;
+  focusSignature: string | null;
+  locationScope: Location | null;
+  searches: Record<Location, string>;
+  quantities: Record<string, string>;
+  error: string;
+  onSearchChange: (location: Location, search: string) => void;
+  onQuantityChange: (location: Location, signature: string, value: string) => void;
+  onAddMinimum?: (item: ClothingItem, location: Location, quantity: number) => void;
+  onClose: () => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  const [browsePaths, setBrowsePaths] = useState<Partial<Record<Location, BrowsePath>>>({ girlfriend: {}, home: {} });
+  const [viewMode, setViewMode] = useState<ViewMode>("overview");
+  const editorLocations = getMinimumEditorLocations(locations, locationScope);
+  const matchesSearch = (item: ClothingItem, search: string) => {
+    const normalizedSearch = search.trim().toLocaleLowerCase();
+    if (!normalizedSearch) return true;
+    return [item.name, item.garmentType, item.garmentGroup, item.colour, item.brand].some((value) => value.toLocaleLowerCase().includes(normalizedSearch));
+  };
+  const itemsForLocation = (location: Location) => getMinimumEditorItems(itemOptions, minimums, location, mode)
+    .filter((item) => !focusSignature || getMinimumSignature(item) === focusSignature)
+    .filter((item) => matchesSearch(item, searches[location] ?? ""));
+  const title = mode === "add" ? "Add minimum pieces" : "Edit minimum pieces";
+  const locationScopeName = locationScope ? getLocationName(locationScope, locations) : null;
+  const intro = mode === "add"
+    ? `Browse ${locationScopeName ? `${locationScopeName} clothing` : "the wardrobe"} the same way as the main board. Add several new location minimums together; leave a field blank to keep it unset.`
+    : `Browse ${locationScopeName ? `${locationScopeName} clothing` : "the wardrobe"} the same way as the main board. Edit the minimums already configured; leave a field blank to remove that location’s minimum.`;
+
+  function navigate(location: Location, path: BrowsePath) {
+    setBrowsePaths((current) => ({ ...current, [location]: path }));
+    setViewMode("overview");
+  }
+
+  function back(location: Location) {
+    setBrowsePaths((current) => {
+      const path = current[location] ?? {};
+      return { ...current, [location]: path.garmentGroup ? { occasion: path.occasion } : {} };
+    });
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+      <section ref={dialogRef} className="item-dialog minimum-bulk-dialog" role="dialog" aria-modal="true" aria-labelledby="minimum-bulk-dialog-title">
+        <div className="dialog-heading">
+          <div>
+            <p className="section-label">{locationScopeName ? `${locationScopeName} coverage` : "Location coverage"}</p>
+            <h2 id="minimum-bulk-dialog-title">{title}</h2>
+          </div>
+          <button className="dialog-close" type="button" onClick={onClose} aria-label="Close minimum editor"><X size={19} aria-hidden="true" /></button>
+        </div>
+        <form className="item-form minimum-bulk-form" onSubmit={onSubmit}>
+          <p className="transit-intro">{intro}</p>
+          <div className="minimum-bulk-toolbar">
+            <div className="browse-mode-toggle" role="group" aria-label="Minimum editor view mode">
+              <button className="view-mode-button" data-active={viewMode === "overview" || undefined} type="button" onClick={() => setViewMode("overview")}><LayoutGrid size={15} aria-hidden="true" /> Overview</button>
+              <button className="view-mode-button" data-active={viewMode === "list" || undefined} type="button" onClick={() => setViewMode("list")}><List size={15} aria-hidden="true" /> List</button>
+            </div>
+          </div>
+          {editorLocations.some((location) => itemsForLocation(location.id).length) ? (
+            <div className={`minimum-editor-board${editorLocations.length === 1 ? " minimum-editor-board-single" : ""}`} aria-label={locationScopeName ? `${locationScopeName} minimums` : "Location minimums"}>
+              {editorLocations.map((location) => {
+                const visibleItems = itemsForLocation(location.id);
+                return (
+                <MinimumLocationOverview
+                  key={location.id}
+                  location={location}
+                  locations={locations}
+                  items={visibleItems}
+                  inventoryItems={itemOptions}
+                  taxonomy={taxonomy}
+                  browsePath={browsePaths[location.id] ?? {}}
+                  quantities={quantities}
+                  listMode={viewMode === "list" || Boolean((searches[location.id] ?? "").trim())}
+                  mode={mode}
+                  onNavigate={navigate}
+                  onBack={back}
+                  onQuantityChange={onQuantityChange}
+                  search={searches[location.id] ?? ""}
+                  onSearchChange={(value) => onSearchChange(location.id, value)}
+                  onAddMinimum={onAddMinimum}
+                />
+                );
+              })}
+            </div>
+          ) : (
+            <div className="minimum-bulk-empty">No clothing items match this search.</div>
+          )}
+          {error ? <p className="form-error" role="alert">{error}</p> : null}
+          <div className="dialog-actions">
+            <button className="secondary-button" type="button" onClick={onClose}>Cancel</button>
+            <button className="save-button" type="submit">Apply minimums</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
+}
+
 function WearingPanel({
   items,
+  locations,
   onStartTransit,
   onConfirmArrival,
   onQuantityChange,
+  onDestinationChange,
   onDelete,
 }: {
   items: ClothingItem[];
+  locations: WardrobeLocation[];
   onStartTransit: () => void;
   onConfirmArrival: () => void;
   onQuantityChange: (item: ClothingItem, quantity: number) => void;
+  onDestinationChange: (item: ClothingItem, destination: Location) => void;
   onDelete: (item: ClothingItem) => void;
 }) {
   const total = getTotalQuantity(items);
@@ -871,6 +1389,13 @@ function WearingPanel({
               <span className="transit-item-copy">
                 <strong>{item.name}</strong>
                 <span>Currently wearing · {item.quantity} {item.quantity === 1 ? "piece" : "pieces"}</span>
+                <label className="transit-destination-field">
+                  <span>Destination</span>
+                  <select value={item.transitDestination ?? ""} onChange={(event) => { if (event.target.value) onDestinationChange(item, event.target.value as Location); }} aria-label={`Destination for ${item.name}`}>
+                    <option value="">Assign destination</option>
+                    {locations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}
+                  </select>
+                </label>
               </span>
               <div className="transit-item-actions">
                 <span className="transit-quantity-control" role="group" aria-label={`Quantity for ${item.name} while in transit`}>
@@ -927,6 +1452,8 @@ function TransitActionDialog({
   taxonomy,
   location,
   onLocationChange,
+  transitDestination,
+  onTransitDestinationChange,
   items,
   selected,
   onSelectionChange,
@@ -940,6 +1467,8 @@ function TransitActionDialog({
   taxonomy: WardrobeTaxonomy;
   location: Location | "";
   onLocationChange: (location: Location | "") => void;
+  transitDestination: Location | "";
+  onTransitDestinationChange: (location: Location | "") => void;
   items: ClothingItem[];
   selected: Record<string, number>;
   onSelectionChange: (itemId: string, quantity: number) => void;
@@ -980,6 +1509,15 @@ function TransitActionDialog({
               {locations.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
             </select>
           </label>
+          {isStart ? (
+            <label>
+              Destination
+              <select value={transitDestination} onChange={(event) => onTransitDestinationChange(event.target.value as Location | "")}>
+                <option value="">Choose a destination</option>
+                {locations.filter((candidate) => candidate.id !== location).map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
+              </select>
+            </label>
+          ) : null}
           <TransitItemPicker
             idPrefix={`${mode}-transit`}
             items={items}
@@ -993,7 +1531,9 @@ function TransitActionDialog({
           <p className="transit-preview" role="status" aria-live="polite">
             {hasSelection && location
               ? isStart
-                ? `${selectedCount} ${selectedCount === 1 ? "piece" : "pieces"} from ${locationName} → Currently wearing`
+                ? transitDestination
+                  ? `${selectedCount} ${selectedCount === 1 ? "piece" : "pieces"} from ${locationName} → Currently wearing → ${getLocationName(transitDestination, locations)}`
+                  : `${selectedCount} ${selectedCount === 1 ? "piece" : "pieces"} from ${locationName} → Currently wearing`
                 : `Currently wearing → ${locationName}`
               : isStart
                 ? "Select at least one piece to start transit."
@@ -1002,7 +1542,7 @@ function TransitActionDialog({
           {error ? <p className="form-error" role="alert">{error}</p> : null}
           <div className="dialog-actions">
             <button className="secondary-button" type="button" onClick={onClose}>Cancel</button>
-            <button className="save-button" type="submit" disabled={!hasSelection || (!isStart && !location)}>{actionLabel}</button>
+            <button className="save-button" type="submit" disabled={!hasSelection || (!location) || (isStart && !transitDestination)}>{actionLabel}</button>
           </div>
         </form>
       </section>
@@ -1115,6 +1655,7 @@ function ColourAutocomplete({
 function SortableItem({
   item,
   locations,
+  minimumStatus,
   dragDisabled = false,
   expanded = false,
   showGarmentType = true,
@@ -1128,6 +1669,7 @@ function SortableItem({
 }: {
   item: ClothingItem;
   locations: WardrobeLocation[];
+  minimumStatus?: MinimumStatus;
   dragDisabled?: boolean;
   expanded?: boolean;
   showGarmentType?: boolean;
@@ -1171,6 +1713,15 @@ function SortableItem({
           <span className="quantity-chip">× {item.quantity}</span>
           <ChevronDown className="item-card-chevron" size={17} aria-hidden="true" />
         </button>
+        {minimumStatus ? (
+          <span className={`item-minimum-status${minimumStatus.shortfall ? " item-minimum-status-alert" : ""}`}>
+            {minimumStatus.shortfall ? <TriangleAlert size={14} aria-hidden="true" /> : <Check size={14} aria-hidden="true" />}
+            <span className="item-minimum-status-copy">
+              <strong>{minimumStatus.shortfall ? `${minimumStatus.shortfall} short · ${minimumStatus.current + minimumStatus.inTransit} / ${minimumStatus.minimum}` : `Minimum ${minimumStatus.minimum} covered`}</strong>
+              {minimumStatus.inTransit ? <small>{minimumStatus.current} stored · {minimumStatus.inTransit} incoming</small> : null}
+            </span>
+          </span>
+        ) : null}
         {expanded ? (
           <div className="item-card-details" id={detailId}>
             <div className="item-detail-list">
@@ -1323,6 +1874,7 @@ function LocationOverview({
   location,
   locations,
   items,
+  minimumStatuses,
   taxonomy,
   browsePath,
   onNavigate,
@@ -1337,10 +1889,13 @@ function LocationOverview({
   onQuantityChange,
   onKeyboardMove,
   onPhotoOpen,
+  onAddMinimum,
+  onEditMinimum,
 }: {
   location: WardrobeLocation;
   locations: WardrobeLocation[];
   items: ClothingItem[];
+  minimumStatuses: MinimumStatus[];
   taxonomy: WardrobeTaxonomy;
   browsePath: BrowsePath;
   onNavigate: (location: Location, path: BrowsePath) => void;
@@ -1355,6 +1910,8 @@ function LocationOverview({
   onQuantityChange: (item: ClothingItem, quantity: number) => void;
   onKeyboardMove: (event: ReactKeyboardEvent<HTMLButtonElement>, item: ClothingItem) => void;
   onPhotoOpen: (photo: PhotoReference, name: string) => void;
+  onAddMinimum: () => void;
+  onEditMinimum: () => void;
 }) {
   const { isOver, setNodeRef } = useDroppable({
     id: `overview-column-${location.id}`,
@@ -1396,6 +1953,7 @@ function LocationOverview({
           </button>
         </div>
       </header>
+      <LocationMinimumSummary location={location} statuses={minimumStatuses} onAddMinimum={onAddMinimum} onEditMinimum={onEditMinimum} />
 
       <div className="overview-body">
         {selectedOccasion ? (
@@ -1463,6 +2021,7 @@ function LocationOverview({
                         key={item.id}
                         item={item}
                         locations={locations}
+                        minimumStatus={minimumStatuses.find((status) => status.location === location.id && minimumMatchesItem(status, item))}
                         dragDisabled
                         expanded={expandedItemId === item.id}
                         showGarmentType={false}
@@ -1496,6 +2055,7 @@ function LocationColumn({
   location,
   locations,
   items,
+  minimumStatuses,
   totalItems,
   hasActiveFilters,
   onAdd,
@@ -1509,10 +2069,13 @@ function LocationColumn({
   onQuantityChange,
   onKeyboardMove,
   onPhotoOpen,
+  onAddMinimum,
+  onEditMinimum,
 }: {
   location: WardrobeLocation;
   locations: WardrobeLocation[];
   items: ClothingItem[];
+  minimumStatuses: MinimumStatus[];
   totalItems: ClothingItem[];
   hasActiveFilters: boolean;
   onAdd: (location: Location) => void;
@@ -1526,6 +2089,8 @@ function LocationColumn({
   onQuantityChange: (item: ClothingItem, quantity: number) => void;
   onKeyboardMove: (event: ReactKeyboardEvent<HTMLButtonElement>, item: ClothingItem) => void;
   onPhotoOpen: (photo: PhotoReference, name: string) => void;
+  onAddMinimum: () => void;
+  onEditMinimum: () => void;
 }) {
   const { isOver, setNodeRef } = useDroppable({
     id: `column-${location.id}`,
@@ -1558,6 +2123,7 @@ function LocationColumn({
           </button>
         </div>
       </header>
+      <LocationMinimumSummary location={location} statuses={minimumStatuses} onAddMinimum={onAddMinimum} onEditMinimum={onEditMinimum} />
 
       <SortableContext items={items.map((item) => item.id)} strategy={verticalListSortingStrategy}>
         <div className="item-list">
@@ -1567,6 +2133,7 @@ function LocationColumn({
                 key={item.id}
                 item={item}
                 locations={locations}
+                minimumStatus={minimumStatuses.find((status) => status.location === location.id && minimumMatchesItem(status, item))}
                 expanded={expandedItemId === item.id}
                 onToggleExpanded={onToggleExpanded}
                 onEdit={onEdit}
@@ -1595,6 +2162,7 @@ type DemoStoredBoard = {
   items: ClothingItem[];
   taxonomy: WardrobeTaxonomy;
   keywordRules: KeywordRule[];
+  minimums: WardrobeMinimum[];
   updatedAt: string | null;
 };
 
@@ -1603,28 +2171,31 @@ type DemoStoredDraft = {
   items: ClothingItem[];
   taxonomy: WardrobeTaxonomy;
   keywordRules: KeywordRule[];
+  minimums: WardrobeMinimum[];
   migrationRequired: boolean;
 };
 
 function isDemoStoredBoard(value: unknown): value is DemoStoredBoard {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<DemoStoredBoard>;
-  return (candidate.schemaVersion === 7 || candidate.schemaVersion === BOARD_SCHEMA_VERSION)
+  return (candidate.schemaVersion === 7 || candidate.schemaVersion === 8 || candidate.schemaVersion === BOARD_SCHEMA_VERSION)
     && Array.isArray(candidate.items)
     && candidate.items.every((item) => isDemoItem(item))
     && Boolean(candidate.taxonomy && typeof candidate.taxonomy === "object")
     && Array.isArray(candidate.keywordRules)
+    && (candidate.minimums === undefined || Array.isArray(candidate.minimums))
     && (candidate.updatedAt === null || typeof candidate.updatedAt === "string");
 }
 
 function isDemoStoredDraft(value: unknown): value is DemoStoredDraft {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<DemoStoredDraft>;
-  return (candidate.schemaVersion === 7 || candidate.schemaVersion === BOARD_SCHEMA_VERSION)
+  return (candidate.schemaVersion === 7 || candidate.schemaVersion === 8 || candidate.schemaVersion === BOARD_SCHEMA_VERSION)
     && Array.isArray(candidate.items)
     && candidate.items.every((item) => isDemoItem(item))
     && Boolean(candidate.taxonomy && typeof candidate.taxonomy === "object")
     && Array.isArray(candidate.keywordRules)
+    && (candidate.minimums === undefined || Array.isArray(candidate.minimums))
     && typeof candidate.migrationRequired === "boolean";
 }
 
@@ -1641,6 +2212,7 @@ function isDemoItem(value: unknown): value is ClothingItem {
     && typeof candidate.notes === "string"
     && typeof candidate.quantity === "number"
     && (candidate.location === "girlfriend" || candidate.location === "home" || candidate.location === "wearing")
+    && (candidate.transitDestination === undefined || (candidate.location === "wearing" && (candidate.transitDestination === "girlfriend" || candidate.transitDestination === "home")))
     && typeof candidate.createdAt === "string"
     && typeof candidate.updatedAt === "string";
 }
@@ -1651,7 +2223,8 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   const [items, setItems] = useState<ClothingItem[]>([]);
   const [taxonomy, setTaxonomy] = useState<WardrobeTaxonomy>(DEFAULT_TAXONOMY);
   const [keywordRules, setKeywordRules] = useState<KeywordRule[]>(cloneDefaultKeywordRules());
-  const [savedSnapshot, setSavedSnapshot] = useState(serializeBoard([], DEFAULT_TAXONOMY, cloneDefaultKeywordRules()));
+  const [minimums, setMinimums] = useState<WardrobeMinimum[]>([]);
+  const [savedSnapshot, setSavedSnapshot] = useState(serializeBoard([], DEFAULT_TAXONOMY, cloneDefaultKeywordRules(), []));
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   const [state, setState] = useState<LoadState>("loading");
   const [message, setMessage] = useState("Loading board");
@@ -1664,12 +2237,20 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [startTransitDialogOpen, setStartTransitDialogOpen] = useState(false);
   const [startTransitLocation, setStartTransitLocation] = useState<Location>("girlfriend");
+  const [startTransitDestination, setStartTransitDestination] = useState<Location | "">("home");
   const [startTransitSelections, setStartTransitSelections] = useState<Record<string, number>>({});
   const [startTransitError, setStartTransitError] = useState("");
   const [arrivalDialogOpen, setArrivalDialogOpen] = useState(false);
   const [arrivalLocation, setArrivalLocation] = useState<Location | "">("");
   const [arrivalSelections, setArrivalSelections] = useState<Record<string, number>>({});
   const [arrivalError, setArrivalError] = useState("");
+  const [minimumBulkDialogOpen, setMinimumBulkDialogOpen] = useState(false);
+  const [minimumEditorMode, setMinimumEditorMode] = useState<MinimumEditorMode>("edit");
+  const [minimumEditorFocusSignature, setMinimumEditorFocusSignature] = useState<string | null>(null);
+  const [minimumEditorLocation, setMinimumEditorLocation] = useState<Location | null>(null);
+  const [minimumBulkSearches, setMinimumBulkSearches] = useState<Record<Location, string>>({ girlfriend: "", home: "" });
+  const [minimumBulkQuantities, setMinimumBulkQuantities] = useState<Record<string, string>>({});
+  const [minimumBulkError, setMinimumBulkError] = useState("");
   const [transferItem, setTransferItem] = useState<ClothingItem | null>(null);
   const [transferQuantity, setTransferQuantity] = useState(1);
   const [transferError, setTransferError] = useState("");
@@ -1709,6 +2290,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   const dialogRef = useRef<HTMLElement | null>(null);
   const startTransitDialogRef = useRef<HTMLElement | null>(null);
   const arrivalDialogRef = useRef<HTMLElement | null>(null);
+  const minimumBulkDialogRef = useRef<HTMLElement | null>(null);
   const transferDialogRef = useRef<HTMLElement | null>(null);
   const taxonomyDialogRef = useRef<HTMLElement | null>(null);
   const photoDialogRef = useRef<HTMLElement | null>(null);
@@ -1724,7 +2306,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
-  const isDirty = migrationRequired || serializeBoard(items, taxonomy, keywordRules) !== savedSnapshot;
+  const isDirty = migrationRequired || serializeBoard(items, taxonomy, keywordRules, minimums) !== savedSnapshot;
   const normalizedSearch = searchQuery.trim().toLocaleLowerCase();
   const hasActiveFilters = Boolean(normalizedSearch || occasionFilter !== "all" || garmentGroupFilter !== "all" || garmentTypeFilter !== "all" || colourFilter !== "all" || brandFilter !== "all");
   const activeFilterCount = [normalizedSearch, occasionFilter, garmentGroupFilter, garmentTypeFilter, colourFilter, brandFilter].filter((value) => value && value !== "all").length;
@@ -1768,7 +2350,11 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   const activeItem = activeId ? items.find((item) => item.id === activeId) ?? null : null;
   const currentTransferItem = transferItem ? items.find((item) => item.id === transferItem.id) ?? null : null;
   const wearingItems = getItemsForLocation(items, "wearing");
+  const minimumStatuses = getMinimumStatuses(minimums, items);
   const startTransitItems = getItemsForLocation(items, startTransitLocation);
+  const minimumItemOptions = Array.from(new Map(items
+    .filter((item) => item.location !== "wearing")
+    .map((item) => [getMinimumSignature(item), item] as const)).values());
   const saveDisabled = !isDirty || !hasLoadedBoard || state === "loading" || state === "saving";
   const statusLabel = state === "loading"
     ? "Loading board"
@@ -1810,7 +2396,11 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
       setItems(nextItems);
       setTaxonomy(nextTaxonomy);
       setKeywordRules(nextKeywordRules);
-      setSavedSnapshot(serializeBoard(savedItems, savedTaxonomy, savedKeywordRules));
+      const savedMinimums = saved?.minimums ?? [];
+      const draftMinimums = draft?.minimums ?? [];
+      const nextMinimums = restoredDraft ? draftMinimums : savedMinimums;
+      setMinimums(nextMinimums);
+      setSavedSnapshot(serializeBoard(savedItems, savedTaxonomy, savedKeywordRules, savedMinimums));
       setLastSavedAt(saved?.updatedAt ?? null);
       setStorageConfigured(storageAvailable);
       setLegacyContentPreserved(false);
@@ -1850,7 +2440,11 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
       setItems(nextItems);
       setTaxonomy(nextTaxonomy);
       setKeywordRules(nextKeywordRules);
-      setSavedSnapshot(serializeBoard(savedItems, savedTaxonomy, savedKeywordRules));
+      const savedMinimums = (data.content.minimums as WardrobeMinimum[] | undefined) ?? [];
+      const draftMinimums = draft?.minimums ?? [];
+      const nextMinimums = restoredDraft ? draftMinimums : savedMinimums;
+      setMinimums(nextMinimums);
+      setSavedSnapshot(serializeBoard(savedItems, savedTaxonomy, savedKeywordRules, savedMinimums));
       setLastSavedAt(data.content.updatedAt ?? null);
       setStorageConfigured(data.storageConfigured);
       setLegacyContentPreserved(Boolean(data.legacyContentPreserved));
@@ -1937,7 +2531,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
       window.removeEventListener("resize", scheduleMeasurement);
       rootStyle.removeProperty("--mobile-save-bar-height");
     };
-  }, [hasLoadedBoard, items.length, filteredItems.length, dialogOpen, startTransitDialogOpen, arrivalDialogOpen, transferItem, taxonomyDialogOpen, photoPreview, locations]);
+  }, [hasLoadedBoard, items.length, filteredItems.length, dialogOpen, startTransitDialogOpen, arrivalDialogOpen, minimumBulkDialogOpen, transferItem, taxonomyDialogOpen, photoPreview, locations]);
 
   useEffect(() => {
     if (!hasLoadedBoard) return;
@@ -1952,6 +2546,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
         items: aggregateItems(items),
         taxonomy,
         keywordRules,
+        minimums,
         migrationRequired,
       } satisfies DemoStoredDraft);
     } else {
@@ -1961,10 +2556,11 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
         items: aggregateItems(items),
         taxonomy,
         keywordRules,
+        minimums,
         migrationRequired,
       });
     }
-  }, [hasLoadedBoard, isDirty, items, taxonomy, keywordRules, migrationRequired, loadedRevision, isDemoMode]);
+  }, [hasLoadedBoard, isDirty, items, taxonomy, keywordRules, minimums, migrationRequired, loadedRevision, isDemoMode]);
 
   useEffect(() => {
     function confirmBeforeUnload(event: BeforeUnloadEvent) {
@@ -2002,12 +2598,19 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
     setDialogOpen(false);
     setStartTransitDialogOpen(false);
     setStartTransitLocation("girlfriend");
+    setStartTransitDestination("home");
     setStartTransitSelections({});
     setStartTransitError("");
     setArrivalDialogOpen(false);
     setArrivalLocation("");
     setArrivalSelections({});
     setArrivalError("");
+    setMinimumBulkDialogOpen(false);
+    setMinimumEditorMode("edit");
+    setMinimumEditorFocusSignature(null);
+    setMinimumBulkSearches({ girlfriend: "", home: "" });
+    setMinimumBulkQuantities({});
+    setMinimumBulkError("");
     setTransferItem(null);
     setTaxonomyDialogOpen(false);
     void loadContent();
@@ -2025,6 +2628,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
         items: aggregateItems(items),
         taxonomy,
         keywordRules,
+        minimums,
         updatedAt: new Date().toISOString(),
       };
       if (!writeDemoRecord(DEMO_SAVED_BOARD_KEY, savedContent)) {
@@ -2036,7 +2640,8 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
       setItems(savedContent.items);
       setTaxonomy(savedContent.taxonomy);
       setKeywordRules(savedContent.keywordRules);
-      setSavedSnapshot(serializeBoard(savedContent.items, savedContent.taxonomy, savedContent.keywordRules));
+      setMinimums(savedContent.minimums);
+      setSavedSnapshot(serializeBoard(savedContent.items, savedContent.taxonomy, savedContent.keywordRules, savedContent.minimums));
       setLastSavedAt(savedContent.updatedAt);
       setStorageConfigured(true);
       setLegacyContentPreserved(false);
@@ -2052,7 +2657,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
       const response = await fetch("/api/content", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ schemaVersion: BOARD_SCHEMA_VERSION, revision: loadedRevision, items: aggregateItems(items), taxonomy, keywordRules }),
+        body: JSON.stringify({ schemaVersion: BOARD_SCHEMA_VERSION, revision: loadedRevision, items: aggregateItems(items), taxonomy, keywordRules, minimums }),
       });
       const data = await response.json();
       if (!response.ok) {
@@ -2069,10 +2674,12 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
       const savedItems = aggregateItems(data.content.items as ClothingItem[]);
       const savedTaxonomy = normalizeTaxonomy(data.content.taxonomy);
       const savedKeywordRules = normalizeKeywordRules(data.content.keywordRules, savedTaxonomy);
+      const savedMinimums = (data.content.minimums as WardrobeMinimum[] | undefined) ?? [];
       setItems(savedItems);
       setTaxonomy(savedTaxonomy);
       setKeywordRules(savedKeywordRules);
-      setSavedSnapshot(serializeBoard(savedItems, savedTaxonomy, savedKeywordRules));
+      setMinimums(savedMinimums);
+      setSavedSnapshot(serializeBoard(savedItems, savedTaxonomy, savedKeywordRules, savedMinimums));
       setLastSavedAt(data.content.updatedAt ?? null);
       setStorageConfigured(true);
       setLegacyContentPreserved(false);
@@ -2219,6 +2826,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   function openStartTransitDialog() {
     dialogReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setStartTransitLocation(mobileAddLocation);
+    setStartTransitDestination(getOtherLocation(mobileAddLocation));
     setStartTransitSelections({});
     setStartTransitError("");
     setStartTransitDialogOpen(true);
@@ -2268,6 +2876,86 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
     setArrivalError("");
   }
 
+  function openMinimumEditor(mode: MinimumEditorMode, minimum?: WardrobeMinimum, locationScope: Location | null = null) {
+    dialogReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const nextQuantities: Record<string, string> = {};
+    for (const location of getMinimumEditorLocations(locations, locationScope)) {
+      for (const item of getMinimumEditorItems(minimumItemOptions, minimums, location.id, mode)) {
+        const signature = getMinimumSignature(item);
+        const existing = minimums.find((minimum) => minimum.location === location.id && getMinimumSettingSignature(minimum) === signature);
+        nextQuantities[getMinimumQuantityKey(location.id, signature)] = existing ? String(existing.minimum) : mode === "add" ? "1" : "";
+      }
+    }
+    setMinimumEditorMode(mode);
+    setMinimumEditorFocusSignature(minimum ? getMinimumSettingSignature(minimum) : null);
+    setMinimumEditorLocation(locationScope);
+    setMinimumBulkSearches({ girlfriend: "", home: "" });
+    setMinimumBulkQuantities(nextQuantities);
+    setMinimumBulkError("");
+    setMinimumBulkDialogOpen(true);
+  }
+
+  function closeMinimumBulkDialog() {
+    setMinimumBulkDialogOpen(false);
+    setMinimumEditorLocation(null);
+    setMinimumBulkError("");
+  }
+
+  function updateMinimumBulkQuantity(location: Location, signature: string, value: string) {
+    setMinimumBulkQuantities((current) => ({ ...current, [getMinimumQuantityKey(location, signature)]: value }));
+    setMinimumBulkError("");
+  }
+
+  function updateMinimumBulkSearch(location: Location, search: string) {
+    setMinimumBulkSearches((current) => ({ ...current, [location]: search }));
+  }
+
+  function addMinimumIndividually(item: ClothingItem, location: Location, quantity: number) {
+    const signature = getMinimumSignature(item);
+    const result = applyMinimumQuantityEdits(minimums, [item], location, { [signature]: String(quantity) }, createItemId);
+    if (result.invalidSignatures.length) {
+      setMinimumBulkError("Enter a whole number from 1 to 999 before adding an individual minimum.");
+      return;
+    }
+    setMinimums(result.minimums);
+    setMinimumBulkQuantities((current) => {
+      const next = { ...current };
+      delete next[getMinimumQuantityKey(location, signature)];
+      return next;
+    });
+    setMinimumBulkError("");
+    setAnnouncement(`${item.name} minimum added at ${getLocationName(location, locations)}. Changes are unsaved.`);
+  }
+
+  function submitMinimumEditor(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    let nextMinimums = minimums;
+    for (const location of getMinimumEditorLocations(locations, minimumEditorLocation)) {
+      const editorItems = getMinimumEditorItems(minimumItemOptions, minimums, location.id, minimumEditorMode);
+      const quantities = Object.fromEntries(editorItems.map((item) => {
+        const signature = getMinimumSignature(item);
+        const value = minimumBulkQuantities[getMinimumQuantityKey(location.id, signature)] ?? "";
+        return [signature, normalizeMinimumEditorQuantity(value, minimumEditorMode)];
+      }));
+      const result = applyMinimumQuantityEdits(nextMinimums, editorItems, location.id, quantities, createItemId);
+      if (result.invalidSignatures.length) {
+        setMinimumBulkError("Enter a whole number from 1 to 999 for each quantity, or leave it blank.");
+        return;
+      }
+      nextMinimums = result.minimums;
+    }
+    setMinimums(nextMinimums);
+    const locationLabel = minimumEditorLocation ? getLocationName(minimumEditorLocation, locations) : "both locations";
+    setAnnouncement(`${minimumEditorMode === "add" ? "Minimums added" : "Minimums updated"} for ${locationLabel}. Changes are unsaved.`);
+    closeMinimumBulkDialog();
+  }
+
+  function removeMinimum(minimum: WardrobeMinimum) {
+    if (!window.confirm(`Remove the ${minimum.minimum}-piece minimum for ${minimum.name}?`)) return;
+    setMinimums((current) => current.filter((candidate) => candidate.id !== minimum.id));
+    setAnnouncement(`${minimum.name} minimum removed. Changes are unsaved.`);
+  }
+
   function updateStartTransitSelection(itemId: string, quantity: number) {
     setStartTransitSelections((current) => {
       const next = { ...current };
@@ -2276,6 +2964,13 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
       return next;
     });
     setStartTransitError("");
+  }
+
+  function updateTransitDestination(item: ClothingItem, destination: Location) {
+    setItems((current) => current.map((candidate) => candidate.id === item.id
+      ? { ...candidate, transitDestination: destination, updatedAt: new Date().toISOString() }
+      : candidate));
+    setAnnouncement(`${item.name} is now expected at ${getLocationName(destination, locations)}. Changes are unsaved.`);
   }
 
   function updateArrivalSelection(itemId: string, quantity: number) {
@@ -2290,9 +2985,13 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
 
   function completeStartTransit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!startTransitDestination) {
+      setStartTransitError("Choose the location where these pieces are going.");
+      return;
+    }
     const selections: OutfitSelection[] = Object.entries(startTransitSelections).map(([itemId, quantity]) => ({ itemId, quantity }));
     try {
-      const nextItems = applyStartTransit(items, startTransitLocation, selections, createItemId);
+      const nextItems = applyStartTransit(items, startTransitLocation, selections, createItemId, new Date().toISOString(), startTransitDestination);
       setItems(nextItems);
       const total = selections.reduce((sum, selection) => sum + selection.quantity, 0);
       setAnnouncement(`${total} ${total === 1 ? "piece" : "pieces"} started transit from ${getLocationName(startTransitLocation, locations)} and is now marked Currently wearing. Changes are unsaved.`);
@@ -2642,7 +3341,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
   }
 
   useEffect(() => {
-    if (!dialogOpen && !startTransitDialogOpen && !arrivalDialogOpen && !transferItem && !taxonomyDialogOpen && !photoPreview) return;
+    if (!dialogOpen && !startTransitDialogOpen && !arrivalDialogOpen && !minimumBulkDialogOpen && !transferItem && !taxonomyDialogOpen && !photoPreview) return;
 
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
@@ -2654,6 +3353,8 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
         ? startTransitDialogRef
         : arrivalDialogOpen
           ? arrivalDialogRef
+          : minimumBulkDialogOpen
+            ? minimumBulkDialogRef
           : transferItem
             ? transferDialogRef
             : taxonomyDialogOpen
@@ -2671,6 +3372,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
         if (dialogOpen) closeDialog();
         if (startTransitDialogOpen) closeStartTransitDialog();
         if (arrivalDialogOpen) closeArrivalDialog();
+        if (minimumBulkDialogOpen) closeMinimumBulkDialog();
         if (transferItem) closeTransferDialog();
         if (taxonomyDialogOpen) closeTaxonomyDialog();
         if (photoPreview) closePhotoPreview();
@@ -2699,7 +3401,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
       dialogReturnFocusRef.current?.focus();
       dialogReturnFocusRef.current = null;
     };
-  }, [dialogOpen, startTransitDialogOpen, arrivalDialogOpen, transferItem, taxonomyDialogOpen, photoPreview]);
+  }, [dialogOpen, startTransitDialogOpen, arrivalDialogOpen, minimumBulkDialogOpen, transferItem, taxonomyDialogOpen, photoPreview]);
 
   function applyKeywordAutofill(current: ItemForm, manualFields: FormManualFields) {
     const suggestion = suggestKeywordClassification(current.name, keywordRules, taxonomy, {
@@ -3098,9 +3800,11 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
       {hasLoadedBoard ? (
         <WearingPanel
           items={wearingItems}
+          locations={locations}
           onStartTransit={openStartTransitDialog}
           onConfirmArrival={openArrivalDialog}
           onQuantityChange={updateWearingQuantity}
+          onDestinationChange={updateTransitDestination}
           onDelete={deleteItem}
         />
       ) : null}
@@ -3191,6 +3895,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
                 location={location}
                 locations={locations}
                 items={getItemsForLocation(items, location.id)}
+                minimumStatuses={minimumStatuses}
                 taxonomy={taxonomy}
                 browsePath={browsePaths[location.id]}
                 onNavigate={navigateOverview}
@@ -3207,6 +3912,8 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
                 onQuantityChange={updateItemQuantity}
                 onKeyboardMove={handleKeyboardMove}
                 onPhotoOpen={openPhotoPreview}
+                onAddMinimum={() => openMinimumEditor("add", undefined, location.id)}
+                onEditMinimum={() => openMinimumEditor("edit", undefined, location.id)}
               />
             ) : (
               <LocationColumn
@@ -3214,6 +3921,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
                 location={location}
                 locations={locations}
                 items={getItemsForLocation(filteredItems, location.id)}
+                minimumStatuses={minimumStatuses}
                 totalItems={getItemsForLocation(items, location.id)}
                 hasActiveFilters={hasActiveFilters}
                 onAdd={openAddDialog}
@@ -3229,6 +3937,8 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
                 onQuantityChange={updateItemQuantity}
                 onKeyboardMove={handleKeyboardMove}
                 onPhotoOpen={openPhotoPreview}
+                onAddMinimum={() => openMinimumEditor("add", undefined, location.id)}
+                onEditMinimum={() => openMinimumEditor("edit", undefined, location.id)}
               />
             )
           ))}
@@ -3254,7 +3964,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
 
       <p className="sr-only" aria-live="polite">{announcement}</p>
 
-      {hasLoadedBoard && !dialogOpen && !startTransitDialogOpen && !arrivalDialogOpen && !transferItem && !taxonomyDialogOpen && !photoPreview && !activeId ? (
+      {hasLoadedBoard && !dialogOpen && !startTransitDialogOpen && !arrivalDialogOpen && !minimumBulkDialogOpen && !transferItem && !taxonomyDialogOpen && !photoPreview && !activeId ? (
         <button
           className="mobile-add-button"
           type="button"
@@ -3266,7 +3976,7 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
         </button>
       ) : null}
 
-      {!dialogOpen && !startTransitDialogOpen && !arrivalDialogOpen && !transferItem && !taxonomyDialogOpen && !photoPreview ? (
+      {!dialogOpen && !startTransitDialogOpen && !arrivalDialogOpen && !minimumBulkDialogOpen && !transferItem && !taxonomyDialogOpen && !photoPreview ? (
         <div ref={mobileSaveBarRef} className="mobile-save-bar" aria-label="Mobile save controls">
           <div className="mobile-save-status" role="status" aria-live="polite">
             <StatusIcon state={state} dirty={isDirty} />
@@ -3505,6 +4215,27 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
         </div>
       ) : null}
 
+      {minimumBulkDialogOpen ? (
+        <MinimumEditorDialog
+          dialogRef={minimumBulkDialogRef}
+          locations={locations}
+          itemOptions={minimumItemOptions}
+          minimums={minimums}
+          taxonomy={taxonomy}
+          mode={minimumEditorMode}
+          focusSignature={minimumEditorFocusSignature}
+          locationScope={minimumEditorLocation}
+          searches={minimumBulkSearches}
+          quantities={minimumBulkQuantities}
+          error={minimumBulkError}
+          onSearchChange={updateMinimumBulkSearch}
+          onQuantityChange={updateMinimumBulkQuantity}
+          onAddMinimum={minimumEditorMode === "add" ? addMinimumIndividually : undefined}
+          onClose={closeMinimumBulkDialog}
+          onSubmit={submitMinimumEditor}
+        />
+      ) : null}
+
       {startTransitDialogOpen ? (
         <TransitActionDialog
           dialogRef={startTransitDialogRef}
@@ -3515,10 +4246,13 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
           onLocationChange={(location) => {
             if (location) {
               setStartTransitLocation(location);
+              setStartTransitDestination((current) => current === location ? getOtherLocation(location) : current);
               setStartTransitSelections({});
               setStartTransitError("");
             }
           }}
+          transitDestination={startTransitDestination}
+          onTransitDestinationChange={(location) => { setStartTransitDestination(location); setStartTransitError(""); }}
           items={startTransitItems}
           selected={startTransitSelections}
           onSelectionChange={updateStartTransitSelection}
@@ -3536,6 +4270,8 @@ export function EditablePage({ config }: { config: WardrobePageConfig }) {
           taxonomy={taxonomy}
           location={arrivalLocation}
           onLocationChange={(location) => { setArrivalLocation(location); setArrivalError(""); }}
+          transitDestination=""
+          onTransitDestinationChange={() => undefined}
           items={wearingItems}
           selected={arrivalSelections}
           onSelectionChange={updateArrivalSelection}

@@ -20,6 +20,7 @@ import {
 import { normalizeStoredColour, type WardrobeColour } from "../../../lib/wardrobe-colours";
 import { formatItemName } from "../../../lib/wardrobe-names";
 import { getWardrobeMode } from "../../../lib/wardrobe-mode";
+import type { WardrobeMinimum } from "../../../lib/wardrobe-types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,7 +29,7 @@ const CONTENT_PATH = process.env.CONTENT_BLOB_PATH || "content/home.json";
 const LEGACY_COPIES_PREFIX = process.env.CONTENT_COPIES_PREFIX || "content/copies";
 const LEGACY_COPIES_INDEX_PATH = `${LEGACY_COPIES_PREFIX}/index.json`;
 const CONTENT_BACKUPS_PREFIX = process.env.CONTENT_BACKUPS_PREFIX || "content/backups";
-const BOARD_SCHEMA_VERSION = 8;
+const BOARD_SCHEMA_VERSION = 9;
 const LOCATIONS = ["girlfriend", "home"] as const;
 type Location = (typeof LOCATIONS)[number];
 const INVENTORY_LOCATIONS = [...LOCATIONS, "wearing"] as const;
@@ -47,6 +48,7 @@ type ClothingItem = {
   notes: string;
   quantity: number;
   location: InventoryLocation;
+  transitDestination?: Location;
   photo?: PhotoReference;
   createdAt: string;
   updatedAt: string;
@@ -64,6 +66,7 @@ type BoardContent = {
   items: ClothingItem[];
   taxonomy?: WardrobeTaxonomy;
   keywordRules?: KeywordRule[];
+  minimums?: WardrobeMinimum[];
   updatedAt?: string;
 };
 
@@ -96,7 +99,7 @@ type LoadedBoard = {
   migrationRequired: boolean;
 };
 
-const emptyBoard: BoardContent = { schemaVersion: BOARD_SCHEMA_VERSION, items: [], taxonomy: DEFAULT_TAXONOMY, keywordRules: cloneDefaultKeywordRules() };
+const emptyBoard: BoardContent = { schemaVersion: BOARD_SCHEMA_VERSION, items: [], taxonomy: DEFAULT_TAXONOMY, keywordRules: cloneDefaultKeywordRules(), minimums: [] };
 
 async function streamToText(stream: ReadableStream<Uint8Array>) {
   return await new Response(stream).text();
@@ -130,7 +133,7 @@ function getSchemaVersionStatus(value: unknown): "missing" | "legacy" | "support
   if (schemaVersion === undefined) return "missing";
   if (typeof schemaVersion !== "number" || !Number.isInteger(schemaVersion) || schemaVersion < 1) return "invalid";
   if (schemaVersion === BOARD_SCHEMA_VERSION) return "supported";
-  if (schemaVersion === 7 || schemaVersion === 6 || schemaVersion === 5 || schemaVersion === 4 || schemaVersion === 3 || schemaVersion === 2) return "supportedLegacy";
+  if (schemaVersion === 8 || schemaVersion === 7 || schemaVersion === 6 || schemaVersion === 5 || schemaVersion === 4 || schemaVersion === 3 || schemaVersion === 2) return "supportedLegacy";
   if (schemaVersion === 1) return "legacy";
   return "unsupported";
 }
@@ -139,8 +142,49 @@ function isQuantity(value: unknown) {
   return value === undefined || (typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 999);
 }
 
+function isMinimum(value: unknown): value is WardrobeMinimum {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.id === "string" && candidate.id.trim().length > 0 && candidate.id.length <= 80
+    && isLocation(candidate.location)
+    && typeof candidate.name === "string" && candidate.name.trim().length > 0 && candidate.name.length <= 255
+    && Array.isArray(candidate.occasions) && candidate.occasions.length > 0 && candidate.occasions.every((occasion) => typeof occasion === "string" && occasion.trim().length > 0)
+    && typeof candidate.garmentGroup === "string" && GARMENT_GROUPS.includes(candidate.garmentGroup as GarmentGroup)
+    && typeof candidate.garmentType === "string" && candidate.garmentType.trim().length > 0
+    && typeof candidate.colour === "string"
+    && typeof candidate.brand === "string" && candidate.brand.length <= 80
+    && (candidate.photoPathname === undefined || (typeof candidate.photoPathname === "string" && candidate.photoPathname.length <= 255))
+    && typeof candidate.minimum === "number" && Number.isInteger(candidate.minimum) && candidate.minimum >= 1 && candidate.minimum <= 999;
+}
+
+function isMinimums(value: unknown): value is WardrobeMinimum[] {
+  if (!Array.isArray(value) || value.length > 200) return false;
+  const ids = new Set<string>();
+  return value.every((minimum) => {
+    if (!isMinimum(minimum) || ids.has(minimum.id)) return false;
+    ids.add(minimum.id);
+    return true;
+  });
+}
+
 function normalizeBrand(value: unknown) {
   return typeof value === "string" ? value.trim().slice(0, 80) : "";
+}
+
+function normalizeMinimums(value: WardrobeMinimum[] | undefined) {
+  return (value ?? []).map((minimum) => {
+    const occasions = normalizeStoredOccasions(minimum.occasions, minimum.occasions[0]);
+    const classification = normalizeStoredGarmentClassification(occasions, minimum.garmentGroup, minimum.garmentType);
+    return {
+      ...minimum,
+      name: formatItemName(minimum.name),
+      occasions,
+      garmentGroup: classification.garmentGroup,
+      garmentType: classification.garmentType,
+      colour: normalizeStoredColour(minimum.colour),
+      brand: normalizeBrand(minimum.brand),
+    };
+  });
 }
 
 function isPhotoReference(value: unknown): value is PhotoReference {
@@ -221,6 +265,7 @@ function isVersion2ClothingItem(value: unknown): value is ClothingItem {
     isQuantity(candidate.quantity) &&
     (candidate.photo === undefined || isPhotoReference(candidate.photo)) &&
     isInventoryLocation(candidate.location) &&
+    (candidate.transitDestination === undefined || (candidate.location === "wearing" && isLocation(candidate.transitDestination))) &&
     isTimestamp(candidate.createdAt) &&
     isTimestamp(candidate.updatedAt)
   );
@@ -255,6 +300,8 @@ function isBoardContent(value: unknown): value is BoardContent {
     (candidate.taxonomy === undefined || (typeof candidate.taxonomy === "object" && candidate.taxonomy !== null)) &&
     ((schemaStatus === "supportedLegacy" && (candidate.keywordRules === undefined || isKeywordRules(candidate.keywordRules, taxonomy))) ||
       (schemaStatus === "supported" && isKeywordRules(candidate.keywordRules, taxonomy))) &&
+    (candidate.minimums === undefined || isMinimums(candidate.minimums)) &&
+    (schemaStatus !== "supported" || isMinimums(candidate.minimums)) &&
     (candidate.updatedAt === undefined || isTimestamp(candidate.updatedAt))
   );
 }
@@ -306,6 +353,7 @@ function normalizeBoard(value: BoardContent): BoardContent {
         notes: item.notes.trim(),
         quantity: item.quantity ?? 1,
         location: item.location,
+        ...(item.location === "wearing" && item.transitDestination && isLocation(item.transitDestination) ? { transitDestination: item.transitDestination } : {}),
         ...(item.photo ? { photo: item.photo } : {}),
         createdAt: item.createdAt,
         updatedAt: item.updatedAt,
@@ -313,6 +361,7 @@ function normalizeBoard(value: BoardContent): BoardContent {
     }),
     taxonomy,
     keywordRules: normalizeKeywordRules(value.keywordRules, taxonomy),
+    minimums: normalizeMinimums(value.minimums),
     updatedAt: now,
   };
 }
@@ -337,9 +386,11 @@ function normalizeLoadedBoard(value: BoardContent): BoardContent {
         brand: normalizeBrand(item.brand),
         needsClassification: item.needsClassification === true,
         quantity: item.quantity ?? 1,
+        ...(item.location === "wearing" && item.transitDestination && isLocation(item.transitDestination) ? { transitDestination: item.transitDestination } : {}),
         ...(item.photo ? { photo: item.photo } : {}),
       };
     }),
+    minimums: normalizeMinimums(value.minimums),
   };
 }
 
@@ -372,6 +423,7 @@ function migrateLegacyBoard(value: LegacyBoardContent): BoardContent {
     })),
     taxonomy: DEFAULT_TAXONOMY,
     keywordRules: cloneDefaultKeywordRules(),
+    minimums: [],
     updatedAt: value.updatedAt,
   };
 }

@@ -33,7 +33,21 @@ export type ClothingItem = {
   notes: string;
   quantity: number;
   location: InventoryLocation;
+  transitDestination?: Location;
   photo?: PhotoReference;
   createdAt: string;
   updatedAt: string;
+};
+
+export type WardrobeMinimum = {
+  id: string;
+  location: Location;
+  name: string;
+  occasions: string[];
+  garmentGroup: GarmentGroup;
+  garmentType: string;
+  colour: WardrobeColour;
+  brand: string;
+  photoPathname?: string;
+  minimum: number;
 };
